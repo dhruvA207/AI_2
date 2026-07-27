@@ -1,0 +1,16 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Environment / secrets
+.env
+
+# macOS
+.DS_Store
