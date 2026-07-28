@@ -1,62 +1,116 @@
 # Track B — training configuration.
 #
-# Placeholder until Stage 4. Stages 0-3 (autograd, tokenizer, transformer, data) run
-# locally on the Mac and need none of this.
+# Two separate pieces of work, per docs/BRIEF.md §6.3:
 #
-# The budget block is wired up before the first rented run, per docs/BRIEF.md §6.3.
-# The dollar figure is deliberately unset: it gets chosen after a local proof run,
-# once there is a real sense of what the pipeline costs.
+#   finetune:  QLoRA on an Apache-2.0 base. THIS IS THE DELIVERABLE. Hours per run.
+#   scratch:   a tiny from-scratch transformer for the curriculum. Optional.
+#
+# Almost everything here is null on purpose. Dimensions come from a measured benchmark
+# on the target GPU, never from a guess (§6.6) — sustained throughput on a throttling
+# laptop is unknown to within a factor of ~2.5, which makes any derived figure fiction.
+#
+# Hard constraint (§6.1): no run exceeds about a week, and the deliverable is measured
+# in hours. If a setting here starts implying a multi-day job, shrink the model or the
+# dataset rather than accepting the longer run.
 
-model:
-  # Sized against the compute budget using Chinchilla-style reasoning (~20 tokens per
-  # parameter). Written down here only after the arithmetic is worked through in
-  # docs/ML_CURRICULUM.md.
-  params: null
-  n_layers: null
-  n_heads: null
-  d_model: null
-  context_length: 1024
-  vocab_size: null
+# Where training runs. ARC itself runs on the Mac; this is a separate machine used as a
+# batch appliance (docs/DECISIONS.md ADR-007).
+device:
+  # cuda | mps | cpu. null means pick at runtime, the way the platform layer does.
+  # Never hardcode: the same code must run on the Mac for smoke tests and the Windows
+  # box for real runs.
+  backend: null
+  # Confirmed by nvidia-smi before any run. Everything assumes NVIDIA; if this GPU is
+  # Intel Arc or AMD the plan needs rethinking (§6.2).
+  vendor_verified: false
+  # Budget usable VRAM, not installed VRAM: Windows reserves some for the desktop
+  # compositor, and the machine is not dedicated to this.
+  usable_vram_gb: 6.5
 
-data:
-  tokens_target: null
-  corpus_dir: null
-  # Permissively licensed sources only, same rule as code dependencies.
-  sources: []
+# ── A — The fine-tune. The deliverable. ──────────────────────────────────────────
+finetune:
+  # Verify the licence on the live Hugging Face model card before committing to a
+  # variant (§3), and record it in docs/DEPENDENCIES.md.
+  base_model: null
+  base_licence: null
+  licence_verified: null
 
-optim:
-  optimizer: adamw
-  lr: 3.0e-4
-  warmup_steps: 500
-  schedule: cosine
-  grad_clip: 1.0
-  weight_decay: 0.1
-  mixed_precision: true
+  method: qlora        # qlora | lora | full
+  quantization: 4-bit  # A 4-bit 7B is ~3.5 GB, leaving room for adapters in 6.5 GB.
 
+  lora:
+    rank: 16
+    alpha: 32
+    dropout: 0.05
+    # Attention projections are the standard target; adding MLP projections costs
+    # memory for usually-marginal gain at this scale.
+    target_modules: [q_proj, k_proj, v_proj, o_proj]
+
+  data:
+    # v1 trains on a public instruction dataset; v2 on ARC's own tool-call traces.
+    # v1 does not wait for v2's data to exist (§6.3).
+    stage: v1
+    source: null
+    licence: null
+    max_examples: null
+    max_seq_length: 1024
+
+  optim:
+    lr: 2.0e-4         # Higher than full fine-tuning: only the adapters are learning.
+    warmup_ratio: 0.03
+    schedule: cosine
+    weight_decay: 0.0  # Weight decay on LoRA adapters mostly fights the adapter.
+    grad_clip: 1.0
+    batch_size: null           # From the benchmark.
+    grad_accum_steps: null     # Chosen with batch_size to hit an effective batch.
+    epochs: 3
+
+# ── B — The from-scratch model. Curriculum only, optional. ───────────────────────
+scratch:
+  enabled: false
+
+  model:
+    # 5-10M params on TinyStories. Writes simple coherent stories, nothing more, and
+    # that is the point — this exists so the transformer gets built by hand (§6.3).
+    params: null
+    n_layers: null
+    n_heads: null
+    d_model: null
+    context_length: 512
+    vocab_size: null   # From the BPE tokenizer trained in curriculum stage 1.
+
+  data:
+    # CDLA-Sharing-1.0. Its §3.5 leaves trained models unencumbered; obligations
+    # attach only to redistributing the data. Corpora live in ~/.arc, never in git.
+    # See docs/DEPENDENCIES.md.
+    source: tinystories
+    licence: CDLA-Sharing-1.0
+    tokens_target: null
+
+  optim:
+    optimizer: adamw
+    lr: 3.0e-4
+    warmup_steps: 500
+    schedule: cosine
+    grad_clip: 1.0
+    weight_decay: 0.1
+    mixed_precision: true
+    batch_size: null
+
+# ── Checkpointing — required for both (§6.5) ─────────────────────────────────────
 checkpoint:
-  # Tuned so an interrupted spot instance loses at most ~10 minutes of work.
+  # Tuned so an interrupted run loses at most ~10 minutes. The interruption we plan
+  # for is thermal throttling or needing the laptop back, not spot preemption.
   every_n_steps: 500
   keep_last: 3
-  # Local disk alone is not durable; spot instances get preempted.
-  upload_to_cloud: false
-  cloud_uri: null
 
-budget:
-  # Compute credits for the GPU rental itself.
-  compute:
-    total_usd: null
-    warning_pct: 75
-    pause_pct: 90
-    hard_stop_pct: 100
-    hourly_rate_usd: null
+  # Every checkpoint carries weights, optimizer state, LR scheduler state, RNG state,
+  # dataloader position, and step count — everything needed for a bit-exact resume.
+  # Written to a temp file and atomically renamed; never a half-written checkpoint.
+  atomic_write: true
 
-  # Claude Code usage. Fails differently: this stops the working *session* while the
-  # training job may still be running, so it is tracked separately.
-  assistant:
-    warning_pct: 75
-    reset_window_hours: 5
+  dir: null  # null means ~/.arc/training/checkpoints
 
-  # --confirm notifies and waits; --auto re-provisions without asking. Default to
-  # confirm so a resume cannot produce surprise charges.
-  resume_mode: confirm
-  state_file: training/budget.json
+# Note: there is no `budget:` block. The compute-credit tracking, hourly rates, cloud
+# upload, and instance re-provisioning from the original §6.3 all assumed rented GPUs.
+# There are none, so there is nothing to meter. See docs/DECISIONS.md ADR-008.

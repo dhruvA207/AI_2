@@ -387,144 +387,152 @@ documented procedure for moving `~/.arc/` between machines.
 
 ---
 
-## 6. TRACK B — TRAINING MY OWN MODEL
+## 6. TRACK B — MY OWN MODEL
 
-This runs alongside Track A. It's as much a course as a build. **Write `docs/ML_CURRICULUM.md` as a
-genuine teaching document** — I want to learn ML, not just end up owning a model. Explain the math
-and the intuition, not just which API to call. Keep `training/NOTEBOOK.md` as a real lab notebook:
-every run, its config, its loss curve, what I learned from it.
+> **Revised 2026-07-28.** This section originally planned a from-scratch model pretrained on a
+> rented 8×H100 node for 24 hours, with compute-credit tracking and spot-instance handling. I
+> have no rented compute and won't be getting any, so that plan described infrastructure that
+> would never exist. What replaced it is below; the reasoning is in `docs/DECISIONS.md`
+> (ADR-008). The original text is in git history.
 
-### 6.1 The curriculum
+Track B is where I get a model that is genuinely mine, and where I learn ML. It runs alongside
+Track A, not instead of it.
 
-**Stage 0 — Foundations.** Before we train anything: tensors and autograd from first principles,
-backprop by hand on a tiny network, a bigram language model, then a single self-attention head from
-scratch. Don't let me skip this. Everything downstream is meaningless without it.
+### 6.0 What changed, and why it's still worth doing
 
-**Stage 1 — Tokenizer.** Byte-pair encoding implemented from scratch, trained on our corpus. I want
-to understand why vocab size trades against sequence length, and why tokenization causes so many of
-the weird failures people blame on models.
+I'm not training an LLM from scratch at a useful scale. That would need a cluster I don't have.
+What I *am* doing is taking an Apache-2.0 base model and making it mine through fine-tuning.
 
-**Stage 2 — The transformer.** In PyTorch, from scratch, no `transformers` library: multi-head
-attention, rotary position embeddings, RMSNorm, SwiGLU feed-forward, residual stream, causal masking,
-KV cache. Modern architecture, not the 2017 original. Every component gets a docstring explaining
-*why* it exists and what problem it solves.
+**That fully satisfies §0.1.** A fine-tune of Apache-2.0 weights is mine to run, modify, sell,
+or close-source. The only obligation travelling to the derivative is NOTICE attribution for the
+base. From-scratch training was never what made this mine — it was about learning, and I can
+get most of that far more cheaply.
 
-**Stage 3 — Data.** Permissively-licensed corpus — open web-text datasets, public domain books, open
-code. Clean, deduplicate with MinHash, quality-filter, shard into memory-mapped binaries. Explain the
-data-quality-to-model-quality relationship, which I gather is the most underrated thing in practical
-ML.
+**Be blunt with me about the ceiling, same as before.** A fine-tuned 7–8B model inherits its
+base's competence and gains my voice, my preferences, and ARC's tool-call format. It will not
+become smarter than its base. What it becomes is *specialised*, which is the thing no
+off-the-shelf model can be.
 
-**Stage 4 — Pretraining.** AdamW, cosine schedule with warmup, gradient clipping, mixed precision,
-gradient accumulation, checkpointing, resume. Instrument the loss curves and teach me to read them —
-what divergence looks like, how to size a model against available compute and data.
+### 6.1 The hard constraint: no run longer than about a week
 
-**Stage 5 — Post-training.** SFT on instruction data. LoRA/QLoRA for cheap adaptation. Optionally
-DPO. Fine-tune on **my own data** — my notes, my writing, my tool-call traces from Track A — so my
-model has a personality and a competence no off-the-shelf model has.
+**The deliverable fine-tune is measured in hours, not days.** A ~20K-example QLoRA SFT run is
+roughly five hours on my hardware; a 5K-example set is under two. I can run ten experiments in
+a week. Using a pretrained base is precisely what buys this, and I don't want it quietly eroded
+by scope creep back toward multi-day runs.
 
-**Stage 6 — Evaluation.** Perplexity, task benchmarks, honest qualitative harness. Include a direct
-comparison against the Track A open-weight model so I develop a calibrated sense of the gap.
+If something in this plan starts implying a multi-day job, that's a signal to shrink the model
+or the dataset, not to accept the longer run.
 
-**Stage 7 — Integration.** Implement `arc/model/custom.py` so my trained model satisfies the
-`LanguageModel` interface and I can select it with `arc model use custom`. Even if it's much weaker,
-running my own model inside my own agent is the milestone that makes this whole thing real to me.
+### 6.2 Hardware
 
-### 6.2 Compute budget — target a 24-hour run
+Training happens on my Windows laptop (i9-13900HS, 32 GB RAM, 8 GB VRAM), used as a batch
+appliance. ARC itself runs on the MacBook Air — see `docs/DECISIONS.md` ADR-007 for why those
+are different machines.
 
-I don't want a 3-hour toy run. **Plan the main pretraining run for roughly 24 hours of wall-clock
-training on rented GPUs**, and size the model and dataset to actually use that budget well.
+Budget **~6.5 GB usable VRAM**, not 8: Windows reserves some for the desktop compositor and
+GPU-accelerated browsers, and the machine isn't dedicated to this.
 
-For reference, Karpathy's nanochat gets a GPT-2-grade model in ~3 hours on an 8×H100 node for around
-$73. Scaling that to 24 hours on the same class of node means:
+**Unverified assumption to settle first:** everything here assumes that GPU is NVIDIA. If it's
+Intel Arc or AMD, ROCm and oneAPI on Windows are poor enough that this plan needs rethinking.
+`nvidia-smi` answers it.
 
-- **Roughly 8× the compute**, which should get me materially past GPT-2 — a ~1B-parameter-class model
-  trained on meaningfully more tokens, in the neighborhood of GPT-3-small quality.
-- **Cost on the order of $200–$400 on spot instances, $400–$700 on-demand**, at mid-2026 8×H100
-  pricing. Give me a real estimate before we launch anything, not a hand-wave.
+### 6.3 The two pieces of work
 
-**Do the scaling math with me before committing.** Use Chinchilla-style compute-optimal reasoning to
-pick the parameter count and token count that best spend a 24-hour budget on whatever node we rent,
-and show me the arithmetic. I want to understand the tradeoff between "bigger model, less data" and
-"smaller model, more data," not just be handed a config. Write the reasoning into
-`docs/ML_CURRICULUM.md`.
+**A — The fine-tune. This is the deliverable.**
 
-Design the run so 24 hours is **not one fragile session**. It must survive interruption:
+QLoRA on a 7–8B Apache-2.0 base (Qwen3 family; verify the licence on the live model card before
+committing to a variant, per §3). A 4-bit 7B is ~3.5 GB of weights, leaving room for adapters
+and activations inside 6.5 GB — this is exactly the case QLoRA was designed for.
 
-- Checkpoint every N steps (tune N so we lose at most ~10 minutes of work).
-- Every checkpoint includes model weights, optimizer state, LR scheduler state, RNG state, dataloader
-  position, and step count — everything needed for a **bit-exact resume**.
-- Upload checkpoints to durable cloud storage as they're written, not just to the instance's local
-  disk. Spot instances get preempted; I don't want to lose 18 hours to that.
-- `training/RESUME.md` documenting the exact commands to bring a run back from a checkpoint on a
-  fresh instance.
+Two rounds, and the first does not wait for the second's data:
 
-Write `training/RENTING_GPUS.md` covering provider options, spot vs on-demand tradeoffs,
-checkpoint-to-cloud setup, and pre-launch cost estimation.
+1. **v1 on a public instruction dataset.** Days of setup, hours of training. Produces a working
+   custom model and proves the whole pipeline end to end.
+2. **v2 on my own data** — my notes, my writing, my tool-call traces from Track A — once ARC has
+   been running long enough to have generated them. Identical pipeline, better data.
 
-### 6.3 Credit-aware pause and resume — build this properly
+Doing v1 first is deliberate: pipeline bugs surface against cheap public data instead of after
+months of trace collection.
 
-This matters to me and I want it engineered, not bolted on. **When credits run low, training pauses
-cleanly and resumes when they reset.** Two separate meters can run out, and I want both handled:
+**B — The from-scratch model. Optional, and purely for the curriculum.**
 
-- **Compute credits** — the GPU rental budget for the training run itself.
-- **My Claude Code usage limits** — the budget for *you* helping me, which resets on a window.
+A 5–10M parameter transformer written from scratch, trained on TinyStories. A few hours. It
+writes simple coherent stories and nothing else, and that is the entire point — I get to build
+autograd, a BPE tokenizer, attention, and a training loop with my own hands, and watch real loss
+curves, without it blocking anything useful.
 
-Note these fail differently: compute credits stop the *training job*, my Claude usage limits stop
-*our working session* while a job may still be running. Handle both, and tell me clearly which one
-tripped.
+It could be scaled to ~200M on a real corpus, which would be GPT-2-small grade. That's a ~3-day
+run and it buys education rather than capability, so it's out of scope unless I explicitly ask.
 
-Build this in `training/budget/`:
+### 6.4 The curriculum
 
-**Budget tracking.** A `BudgetTracker` that reads limits from `config/training.yaml` — total budget,
-warning threshold, hard-stop threshold, reset schedule. It tracks spend continuously: elapsed GPU
-hours × rate for compute, and for Claude Code, a token/usage counter I can update plus a
-reset-window timestamp. Persist state to `~/.arc/training/budget.json` so it survives a restart.
+`docs/ML_CURRICULUM.md` is a genuine teaching document, not a runbook. Explain the math and the
+intuition, not just which API to call. `training/NOTEBOOK.md` is a real lab notebook: every run,
+its config, its loss curve, what I learned.
 
-**Thresholds and behavior.** Make these configurable with sensible defaults:
+**Stage 0 — Foundations.** Tensors and autograd from first principles, backprop by hand on a
+tiny network, a bigram language model, then a single self-attention head. Don't let me skip
+this.
 
-- **Warning (default 75%)** — log it, notify me, keep training.
-- **Pause (default 90%)** — checkpoint immediately, shut the run down cleanly, release the GPU
-  instance so I stop paying for idle hardware, and record why it paused and when the budget resets.
-- **Hard stop (100%)** — checkpoint, terminate everything, alert me loudly.
+**Stage 1 — Tokenizer.** BPE from scratch. Why vocab size trades against sequence length, and
+why tokenization causes so many failures people blame on models.
 
-**Clean pause, not a kill.** A pause finishes the current step, writes a full checkpoint, flushes it
-to cloud storage, writes a `PAUSED` state file with the step number, reason, and expected resume
-time, then exits zero. Never leave a half-written checkpoint — write to a temp file and atomically
-rename.
+**Stage 2 — The transformer.** PyTorch, from scratch, no `transformers` library: multi-head
+attention, RoPE, RMSNorm, SwiGLU, residual stream, causal masking, KV cache. Modern
+architecture, not the 2017 original. Every component gets a docstring explaining *why* it
+exists.
 
-**Auto-resume.** A supervisor process (`training/budget/supervisor.py`) that runs independently of
-the training job. It watches for the reset window, and when credits are back it re-provisions an
-instance, pulls the latest checkpoint, and restarts training from the exact step. Two modes I want:
-`--auto` resumes without asking, `--confirm` notifies me and waits for my go-ahead. Default to
-`--confirm` so I don't get surprise charges.
+**Stage 3 — Data.** For the from-scratch model, TinyStories. For the fine-tune, instruction
+data and my own traces. Cleaning, dedup, formatting, and the data-quality-to-model-quality
+relationship, which I gather is the most underrated thing in practical ML.
 
-**Manual control.** CLI commands I can use any time:
+**Stage 4 — Training the small model.** AdamW, cosine schedule with warmup, gradient clipping,
+mixed precision, gradient accumulation, checkpointing, resume. Teach me to read a loss curve —
+what divergence looks like, how to size a model against available compute.
+
+**Stage 5 — Fine-tuning.** SFT, LoRA/QLoRA, optionally DPO. This is where the deliverable comes
+from.
+
+**Stage 6 — Evaluation.** Perplexity, task benchmarks, an honest qualitative harness, and a
+direct comparison against the stock base model so I can see exactly what my fine-tune changed —
+including where it made things worse.
+
+**Stage 7 — Integration.** `arc/model/custom.py`, so my model satisfies the `LanguageModel`
+interface and I can select it with `arc model use custom`. Since the fine-tune shares its base's
+architecture, this is nearly free — which is the swappable-brain design (§4.1) paying off.
+
+### 6.5 Interruption and resume — still required
+
+The justification changed but the requirement didn't. A run gets interrupted because the laptop
+throttled, or because I need it back — not because a spot instance got preempted.
+
+- Checkpoint every N steps, tuned so I lose at most ~10 minutes of work.
+- Every checkpoint carries model weights, optimizer state, LR scheduler state, RNG state,
+  dataloader position, and step count — everything needed for a **bit-exact resume**.
+- Write to a temp file and atomically rename. Never leave a half-written checkpoint.
+- `training/RESUME.md` documenting the exact commands to bring a run back.
+
+CLI, unchanged in spirit:
 
 ```
-arc train status      # step, elapsed, spend, budget remaining, est. time/cost to finish
+arc train status      # step, elapsed, throughput, est. time to finish
 arc train pause       # graceful checkpoint-and-stop right now
 arc train resume      # resume from latest checkpoint
-arc train estimate    # projected total cost and completion time at current rate
-arc train budget set  # adjust limits mid-run
 ```
 
-`arc train status` should be genuinely informative — I want to glance at it and know whether I'm
-going to run out before the run finishes.
+**Dropped along with the rented cluster:** dollar budgets, `hourly_rate_usd`, compute-credit
+thresholds, cloud checkpoint upload, `supervisor.py` instance re-provisioning, and
+`RENTING_GPUS.md`. There are no compute credits to track. My Claude Code usage limits still
+exist, but those stop *our working session*, not a training job, and don't need a `BudgetTracker`
+to manage.
 
-**Projected-overrun detection.** Don't just react at 90%. Continuously project total spend against
-remaining steps, and if the run is going to blow the budget before it completes, tell me *early* with
-options: reduce steps, reduce model size, raise the budget, or accept an early stop. Surface that as
-soon as the projection is confident, not at hour 22.
+### 6.6 Measure before promising
 
-**Log every budget event** to the audit log — thresholds crossed, pauses, resumes, spend snapshots.
-When I look back at a run I want the full financial history next to the loss curve.
-
-### 6.4 Set my expectations honestly
-
-Most of Stages 0–3 run fine on my Mac. Stage 4 needs rented GPUs. And be straight with me in the
-curriculum doc: even with a 24-hour run, what comes out will write coherent English and follow simple
-instructions. It won't be Claude. That's the expected outcome, it's still an accomplishment very few
-people actually finish, and I'd rather know that going in than be disappointed at the end.
+Sustained throughput on that laptop is unknown, and my estimates for it span a factor of 2.5 —
+which makes every derived run-time figure fiction. **The first Track B task is a benchmark** over
+a window long enough to throttle. No predicted training times go into any doc before then, and
+`config/training.yaml` keeps its dimensions `null` until they come from a measurement rather
+than a guess.
 
 ---
 
