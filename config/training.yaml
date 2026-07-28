@@ -1,0 +1,62 @@
+# Track B — training configuration.
+#
+# Placeholder until Stage 4. Stages 0-3 (autograd, tokenizer, transformer, data) run
+# locally on the Mac and need none of this.
+#
+# The budget block is wired up before the first rented run, per docs/BRIEF.md §6.3.
+# The dollar figure is deliberately unset: it gets chosen after a local proof run,
+# once there is a real sense of what the pipeline costs.
+
+model:
+  # Sized against the compute budget using Chinchilla-style reasoning (~20 tokens per
+  # parameter). Written down here only after the arithmetic is worked through in
+  # docs/ML_CURRICULUM.md.
+  params: null
+  n_layers: null
+  n_heads: null
+  d_model: null
+  context_length: 1024
+  vocab_size: null
+
+data:
+  tokens_target: null
+  corpus_dir: null
+  # Permissively licensed sources only, same rule as code dependencies.
+  sources: []
+
+optim:
+  optimizer: adamw
+  lr: 3.0e-4
+  warmup_steps: 500
+  schedule: cosine
+  grad_clip: 1.0
+  weight_decay: 0.1
+  mixed_precision: true
+
+checkpoint:
+  # Tuned so an interrupted spot instance loses at most ~10 minutes of work.
+  every_n_steps: 500
+  keep_last: 3
+  # Local disk alone is not durable; spot instances get preempted.
+  upload_to_cloud: false
+  cloud_uri: null
+
+budget:
+  # Compute credits for the GPU rental itself.
+  compute:
+    total_usd: null
+    warning_pct: 75
+    pause_pct: 90
+    hard_stop_pct: 100
+    hourly_rate_usd: null
+
+  # Claude Code usage. Fails differently: this stops the working *session* while the
+  # training job may still be running, so it is tracked separately.
+  assistant:
+    warning_pct: 75
+    reset_window_hours: 5
+
+  # --confirm notifies and waits; --auto re-provisions without asking. Default to
+  # confirm so a resume cannot produce surprise charges.
+  resume_mode: confirm
+  state_file: training/budget.json

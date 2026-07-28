@@ -1,0 +1,42 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ARC runtime data (lives in ~/.arc, but never commit strays)
+*.log
+*.jsonl
+hardware.json
+
+# Models / checkpoints — never commit weights
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+models/
+checkpoints/
+
+# Training corpora — never commit data.
+# Not just size: TinyStories is CDLA-Sharing-1.0, whose obligations attach to
+# redistributing the *data* while leaving trained models unencumbered. Keeping corpora
+# out of git is what makes that distinction hold. See docs/DEPENDENCIES.md.
+data/
+corpora/
+*.arrow
+*.parquet
+
+# Secrets
+.env
+config/secrets.yaml
+
+# macOS
+.DS_Store

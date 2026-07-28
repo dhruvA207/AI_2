@@ -1,0 +1,52 @@
+# ARC base configuration.
+#
+# This file merges at the root of the config namespace; every other file in this
+# directory merges under a key named after itself (policy.yaml -> `policy.*`).
+#
+# Override order, later winning:
+#   1. this file
+#   2. ~/.arc/config.yaml        (machine-local, never committed)
+#   3. ARC_* environment vars    (ARC_RUNTIME__DRY_RUN=true -> runtime.dry_run)
+
+runtime:
+  # Log intended actions without executing them. Not a safety feature — a
+  # development convenience, per the brief.
+  dry_run: false
+  session_name: arc
+
+logging:
+  # Level for the JSONL file.
+  level: info
+  to_file: true
+  # The console stream stays quiet by default so CLI output is readable; the full
+  # detail is always in the file.
+  console: true
+  console_level: warning
+
+audit:
+  enabled: true
+  # fsync on every record costs a few ms per tool call. Off by default: data still
+  # survives a process crash, only a kernel panic or power loss can lose the tail.
+  fsync: false
+  # Serialized values longer than this are clipped so one screenshot or file dump
+  # cannot make the log unreadable.
+  max_field_chars: 4000
+
+hardware:
+  # Re-probe on startup rather than trusting a cached file. Cheap (~1s) and the
+  # machine genuinely changes: external GPUs, memory pressure, OS upgrades.
+  refresh_on_startup: true
+
+  # Memory the OS and other applications need. On unified-memory machines the GPU
+  # shares this pool, so a model that fits on paper will swap without this reserve.
+  os_reserve_gb: 4.0
+  os_reserve_fraction: 0.28
+
+  # Rough resident cost of the other models ARC wants loaded, used to warn when they
+  # will not co-reside with the main model. Refine these in Phase 2 and Phase 6 once
+  # we have measured the real ones.
+  vlm_estimate_gb: 4.0
+  embedder_estimate_gb: 0.5
+
+  # Warn when weights leave less than this much room for KV cache growth.
+  min_headroom_gb: 2.0

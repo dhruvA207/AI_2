@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arc"
+version = "0.1.0"
+description = "ARC — a local-first, fully-owned AI assistant."
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "Dhruv Agrawal" }]
+
+# Every dependency here must be Apache-2.0 or MIT (docs/BRIEF.md §0.1).
+# Each one also gets a row in docs/DEPENDENCIES.md explaining why it earns its place.
+dependencies = [
+    "PyYAML>=6.0",  # MIT
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",   # MIT
+    "ruff>=0.6",     # MIT
+    "mypy>=1.11",    # MIT
+    "types-PyYAML",  # Apache-2.0
+]
+
+[project.scripts]
+arc = "arc.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["arc*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF", "ANN"]
+ignore = ["ANN401"]  # Any is legitimate in the config/JSON boundary layers.
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]  # Test functions do not need return annotations to be readable.
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+# Platform stubs deliberately raise NotImplementedError; that is not dead code.
+disallow_untyped_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

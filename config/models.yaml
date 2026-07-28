@@ -1,0 +1,44 @@
+# Model registry — populated in Phase 2.
+#
+# Deliberately empty of concrete entries. Per docs/BRIEF.md §3, every model's licence
+# must be verified against its live Hugging Face model card (URL + date recorded in
+# docs/DEPENDENCIES.md) before it is written here. Hardcoding from memory is exactly
+# the failure mode the brief warns about.
+#
+# Confirmed preference for Track A: the Qwen3 family, pending that licence check.
+#
+# Expected shape once populated:
+#
+#   registry:
+#     qwen3-8b-instruct:
+#       backend: mlx            # mlx | llamacpp | vllm | transformers | custom
+#       repo: <hf repo id>
+#       quantization: 4-bit
+#       context_length: 32768
+#       licence: Apache-2.0
+#       licence_verified: "2026-07-27"
+#       capabilities:
+#         native_tool_calling: true
+#         vision: false
+#         json_mode: true
+
+registry: {}
+
+# Which registry entry to use for each role. Filled in during Phase 2.
+active:
+  chat: null
+  vision: null
+  embedding: null
+
+router:
+  # Pick a backend from ~/.arc/hardware.json rather than hardcoding one.
+  auto_select_backend: true
+  # Explicit override; null means let the router decide.
+  force_backend: null
+  # Unload a model when another needs the memory. Required on this 16 GB machine,
+  # where the chat model and a VLM cannot co-reside.
+  evict_when_constrained: true
+
+generation:
+  max_tokens: 2048
+  temperature: 0.7
