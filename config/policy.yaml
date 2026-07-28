@@ -1,0 +1,50 @@
+# Access policy.
+#
+# Per docs/BRIEF.md §0.3 every value here defaults to fully permissive: ARC reads and
+# writes anywhere the user account can, runs any command, and does not ask first.
+#
+# The keys exist so that behaviour is a config change rather than a code change if
+# that decision is ever revisited. Nothing in Phase 1 enforces them yet; the
+# enforcement points land with the tools in Phase 4.
+
+filesystem:
+  unrestricted: true
+  # Empty means no restriction. A non-empty list would confine ARC to these roots.
+  allowed_roots: []
+  denied_paths: []
+  # Whether deletes go to the OS trash instead of being unlinked. False = real delete.
+  trash_deletes: false
+
+shell:
+  unrestricted: true
+  denied_commands: []
+  # Seconds before a command is killed. Null means no limit.
+  timeout_seconds: null
+
+input_control:
+  # Mouse and keyboard control (Phase 6).
+  enabled: true
+
+screen:
+  capture_enabled: true
+  # Screenshots are downscaled before reaching the vision model; full resolution
+  # destroys the token budget.
+  max_dimension_px: 1568
+  cache_ttl_seconds: 2.0
+
+network:
+  enabled: true
+  respect_robots_txt: true
+  requests_per_second: 1.0
+  user_agent: "ARC/0.1 (personal assistant; +local)"
+
+confirmation:
+  # No prompts. The brief is explicit about this.
+  require_for_writes: false
+  require_for_shell: false
+  require_for_deletes: false
+
+audit:
+  # Whether a failure to write the audit log should stop the action. True: an
+  # unlogged action is worse than a refused one, because it breaks debugging.
+  fail_closed: true
