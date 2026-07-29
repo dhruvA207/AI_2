@@ -293,3 +293,82 @@ a fact came from when asked (§4.4).
 **Consequence.** `/why` exposes the retrieval provenance — score and which of the four
 strategies found each memory — because "why did it say that?" is the first question when
 memory misbehaves, and the answer needs more than the result list.
+
+---
+
+## ADR-017 — Web research uses the standard library, because the obvious stack is GPL-tainted
+
+**Decision.** Fetching, robots.txt, and HTML content extraction are built on
+`urllib.request`, `urllib.robotparser`, and `html.parser`. **Zero third-party
+dependencies**, which was not the plan.
+
+**Why.** The intended stack was `requests` + `trafilatura`. A licence audit of the
+resulting dependency tree — which §0.1 requires and §3 warns must be done rather than
+assumed — found:
+
+- **`tld`: MPL-1.1 OR GPL-2.0-only OR LGPL-2.1-or-later.** Pulled in transitively by
+  trafilatura → courlan → tld. §0.1 forbids GPL outright. Trafilatura itself is
+  Apache-2.0 (and only since v1.8.0 — it was GPLv3+ before, exactly the drift §3 warns
+  about), but its tree is not.
+- **`certifi`: MPL-2.0**, pulled in by requests.
+
+Rather than hunt for a second-best extraction library, the stdlib turned out to cover
+it in ~250 lines: `urllib.robotparser` was needed for §4.4 anyway, and Python's `ssl`
+module validates against the system trust store without certifi.
+
+**Cost, stated honestly.** The extractor is a readability-style heuristic — discard
+tags that are never content, score the rest by paragraph density, keep the best
+subtree. It is **not as good as trafilatura**. It is good enough to feed a summariser,
+and it has no licence attached.
+
+**What the audit did *not* fix.** `certifi` (MPL-2.0) is still in the tree via
+mlx-lm → huggingface_hub → httpx, and `pathspec` (MPL-2.0) via the dev tooling. Both
+predate this phase. MPL-2.0 is file-level copyleft and imposes nothing when used
+unmodified, and neither is in §0.1's forbidden list — but neither is Apache or MIT
+either, so they are recorded rather than glossed over. The hard violation, GPL via
+`tld`, is what avoiding trafilatura actually prevented.
+
+---
+
+## ADR-018 — Search uses DuckDuckGo's lite endpoint, verified against robots.txt
+
+**Decision.** `arc/web/search.py` queries `lite.duckduckgo.com/lite/`. No API key.
+
+**Why.** §4.4 requires respecting robots.txt, and the obvious alternatives forbid
+exactly what we would need to do — checked, not assumed:
+
+| Endpoint | robots.txt |
+|---|---|
+| `google.com/search` | **disallowed** |
+| `bing.com/search` | **disallowed** |
+| `duckduckgo.com/html/` | **disallowed** |
+| `lite.duckduckgo.com/lite/` | allowed |
+
+Building robots.txt compliance and then circumventing it would make the compliance
+decorative. No API key also means nothing is shared with a third-party search service
+beyond the query itself, which any search necessarily reveals.
+
+**Consequence.** ARC identifies itself honestly in its user agent rather than
+impersonating a browser. A site that blocks a declared agent is a site that does not
+want to be read, and evading that is not something this project should do.
+
+---
+
+## ADR-019 — Web facts carry provenance and expire by category
+
+**Decision.** Every fact learned from the web is stored with its source URL, the date
+retrieved, and confidence 0.7 (below anything the user stated directly). Staleness is
+per-category: queries containing words like "latest", "current", "price", or "version"
+get a 1-day TTL; everything else gets 90 days.
+
+**Why.** §4.4 requires that ARC can cite a fact when asked and re-verify time-sensitive
+ones rather than trusting them forever. A fact ARC cannot attribute is one it cannot
+defend when questioned, and one it cannot re-check when it goes stale. The category
+split matters because facts do not all age alike — "who invented the transistor" never
+expires; "the latest Python release" expires in days.
+
+**Measured.** First research run: 12.2s over the network, 5 facts stored. Identical
+question immediately after: **0.01s, answered from memory, citing the source URL.**
+
+**Consequence.** An unparseable `retrieved_at` is treated as stale. If we cannot vouch
+for a fact's age, re-verifying is cheap and being confidently wrong is not.
