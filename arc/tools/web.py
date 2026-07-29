@@ -9,11 +9,13 @@ they still run under ``--dry-run``: looking something up changes nothing.
 
 from __future__ import annotations
 
+from typing import Any
+
 from arc.errors import ToolError, WebError
 from arc.log import get_logger
 from arc.tools.registry import tool
 from arc.web.extract import extract
-from arc.web.fetch import Fetcher
+from arc.web.fetch import Fetcher, RateLimiter
 from arc.web.research import preview
 from arc.web.search import search as run_search
 
@@ -22,7 +24,44 @@ _log = get_logger(__name__)
 #: One fetcher for the process, so the rate limiter and robots.txt cache are shared.
 #: A fresh fetcher per call would re-download robots.txt every time and defeat the
 #: per-host delay entirely.
-_fetcher = Fetcher()
+_fetcher: Fetcher | None = None
+_backends: list[str] | None = None
+
+
+def configure(config: Any) -> None:
+    """Apply the ``web`` config section.
+
+    Called once at startup. Until it is, the defaults apply — robots.txt respected and
+    the standard backend order — so a caller that forgets to configure gets the
+    conservative behaviour rather than an unconfigured one.
+    """
+    global _fetcher, _backends
+
+    section = config.section("web")
+    search_config = section.get("search") or {}
+
+    _fetcher = Fetcher(
+        timeout=float(section.get("timeout", 20.0)),
+        respect_robots=bool(section.get("respect_robots", True)),
+        limiter=RateLimiter(float(section.get("rate_limit_delay", 1.0))),
+    )
+    _backends = list(search_config.get("backends") or [])
+
+    if not _fetcher.respect_robots:
+        # Loud, once, at startup. Silently ignoring robots.txt is the kind of thing
+        # that should never be a surprise when reading the audit log later.
+        _log.warning(
+            "robots.txt compliance is DISABLED (web.respect_robots=false); "
+            "google and bing search are reachable"
+        )
+
+
+def _client() -> Fetcher:
+    """Return the shared fetcher, building a default one if unconfigured."""
+    global _fetcher
+    if _fetcher is None:
+        _fetcher = Fetcher()
+    return _fetcher
 
 
 @tool(category="web")
@@ -34,7 +73,7 @@ def web_search(query: str, limit: int = 6) -> str:
         limit: How many results to return.
     """
     try:
-        results = run_search(query, limit=limit, fetcher=_fetcher)
+        results = run_search(query, limit=limit, fetcher=_client(), backends=_backends)
     except WebError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -52,7 +91,7 @@ def web_fetch(url: str, max_chars: int = 8000) -> str:
         max_chars: Truncate the extracted text at this length.
     """
     try:
-        response = _fetcher.fetch(url)
+        response = _client().fetch(url)
     except WebError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -81,7 +120,7 @@ def web_links(url: str, limit: int = 30) -> str:
         limit: How many links to return.
     """
     try:
-        response = _fetcher.fetch(url)
+        response = _client().fetch(url)
     except WebError as exc:
         raise ToolError(str(exc)) from exc
 

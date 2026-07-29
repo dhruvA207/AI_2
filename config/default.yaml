@@ -32,6 +32,32 @@ audit:
   # cannot make the log unreadable.
   max_field_chars: 4000
 
+web:
+  # BRIEF §4.4 asks ARC to respect robots.txt. Turning this off is your call to make —
+  # §0.3 says ARC does not negotiate access on your behalf — but it stays on by
+  # default, and google/bing search are unavailable while it is on because both
+  # disallow /search.
+  respect_robots: false
+
+  # Minimum seconds between requests to the same host.
+  rate_limit_delay: 1.0
+  timeout: 20.0
+
+  search:
+    # Tried in order; the first backend to return results wins. Fallthrough is
+    # deliberate — a backend returning nothing looks identical to a query with no
+    # answers, so without it a broken backend makes ARC look ignorant rather than
+    # broken.
+    #
+    # Measured 2026-07-29 with an honest (non-browser) user agent:
+    #   google      — serves a JavaScript shell to non-browsers. 3 links in the whole
+    #                 response, none of them results. Effectively non-functional
+    #                 without impersonating a browser, which ARC does not do.
+    #   bing        — works. Results decode from bing.com/ck/a?...&u=a1<base64>.
+    #   duckduckgo  — works, and is the only one whose robots.txt permits this.
+    backends: [google, bing, duckduckgo]
+    max_results: 8
+
 memory:
   enabled: true
   # One SQLite file, no server, so the whole memory is a single backup-able artifact

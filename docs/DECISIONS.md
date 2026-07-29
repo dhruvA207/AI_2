@@ -372,3 +372,41 @@ question immediately after: **0.01s, answered from memory, citing the source URL
 
 **Consequence.** An unparseable `retrieved_at` is treated as stale. If we cannot vouch
 for a fact's age, re-verifying is cheap and being confidently wrong is not.
+
+---
+
+## ADR-020 — Google and Bing search enabled, robots.txt compliance now opt-out
+
+**Decision.** `config/default.yaml` sets `web.respect_robots: false` and
+`web.search.backends: [google, bing, duckduckgo]`, tried in that order. This
+**supersedes ADR-018's default** at the user's explicit instruction.
+
+**Why the user's call.** Google and Bing both disallow `/search` in robots.txt, so
+querying them requires the override. §0.3 is explicit that ARC does not negotiate
+access on the user's behalf, and robots.txt is a convention rather than a legal
+control, so this is theirs to set. It is a single config line either way.
+
+**What was measured before enabling it**, on 2026-07-29 with an honest user agent:
+
+| Backend | Response | Usable results |
+|---|---|---|
+| google | 200, 90 KB, contains `enablejs` | **0** — 3 links total, one to support.google.com |
+| bing | 200, 115 KB | **9**, wrapped in `bing.com/ck/a?...&u=a1<base64>` |
+| duckduckgo lite | 200 | works |
+
+**So Google is configured first but does not function.** It serves a JavaScript shell
+to any client that is not a browser. Making it the sole backend would have made search
+return nothing at all.
+
+**Consequence: backends fall through on empty results, not just on errors.** A backend
+returning zero results is indistinguishable, from the caller's side, from a query with
+no answers — so without fallthrough a non-functional default would make ARC look
+ignorant rather than broken, and the second is far easier to diagnose. Google is tried
+first as instructed; Bing answers.
+
+**What was not done.** ARC still identifies itself honestly in its user agent and does
+not execute JavaScript. Making Google work would require impersonating a browser to
+defeat bot detection, which is a different kind of act from ignoring a robots.txt
+directive, and is not something this project does. The disabled-compliance state is
+logged as a warning at every startup so it can never be a surprise when reading the
+audit trail later.

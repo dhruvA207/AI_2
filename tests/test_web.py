@@ -15,7 +15,13 @@ from arc.errors import WebError
 from arc.web.extract import chunk, extract
 from arc.web.fetch import Fetcher, RateLimiter, _decode
 from arc.web.research import is_stale, ttl_for
-from arc.web.search import _unwrap
+from arc.web.search import (
+    SearchResult,
+    _parse_bing,
+    _parse_google,
+    _unwrap,
+    search_with,
+)
 
 PAGE = """<html><head><title>  Rust Ownership  </title></head><body>
 <nav class="site-nav"><a href="/">Home</a><a href="/about">About</a></nav>
@@ -258,3 +264,96 @@ def test_unparseable_timestamps_are_treated_as_stale() -> None:
 def test_naive_timestamps_are_assumed_utc() -> None:
     naive = (datetime.now(UTC) - timedelta(days=1)).replace(tzinfo=None).isoformat()
     assert not is_stale(naive, 90)
+
+
+# ── Search backends ─────────────────────────────────────────────────────────────
+
+
+def test_bing_redirect_is_base64_decoded() -> None:
+    """Bing wraps results in ck/a?...&u=a1<base64url>; without decoding, every result
+    would point at bing.com rather than the page."""
+    href = (
+        "https://www.bing.com/ck/a?!&&p=abc&u=a1"
+        "aHR0cHM6Ly9ibG9nLmxvZ3JvY2tldC5jb20vaW50cm9kdWNpbmctcnVzdC1ib3Jyb3ctY2hlY2tlci8&ntb=1"
+    )
+    assert _unwrap(href) == "https://blog.logrocket.com/introducing-rust-borrow-checker/"
+
+
+def test_malformed_bing_payload_does_not_raise() -> None:
+    assert _unwrap("https://www.bing.com/ck/a?u=a1!!!notbase64!!!")
+
+
+def test_bing_results_are_parsed() -> None:
+    html = (
+        '<h2><a href="https://www.bing.com/ck/a?u=a1'
+        'aHR0cHM6Ly9leGFtcGxlLmNvbS9wYWdl&ntb=1">Example Page Title</a></h2>'
+    )
+    results = _parse_bing(html, limit=5)
+    assert len(results) == 1
+    assert results[0].url == "https://example.com/page"
+    assert results[0].backend == "bing"
+
+
+def test_bing_internal_links_are_not_results() -> None:
+    html = '<h2><a href="https://www.bing.com/images/search?q=x">Images</a></h2>'
+    assert _parse_bing(html, limit=5) == []
+
+
+def test_google_backends_require_the_robots_override() -> None:
+    """Both disallow /search, so they are unreachable while compliance is on."""
+    polite = Fetcher(respect_robots=True)
+    for backend in ("google", "bing"):
+        with pytest.raises(WebError, match=r"robots\.txt"):
+            search_with(backend, "anything", fetcher=polite)
+
+
+def test_unknown_backend_is_rejected() -> None:
+    with pytest.raises(WebError, match="unknown search backend"):
+        search_with("altavista", "anything")
+
+
+def test_google_parser_survives_a_javascript_shell() -> None:
+    """Measured 2026-07-29: Google serves non-browsers a shell with no results. The
+    parser must return nothing rather than inventing results from chrome links."""
+    shell = '<html><body><div id="main"><a href="https://support.google.com/x">Help</a>'
+    shell += '<a href="/preferences">Settings</a></div></body></html>'
+    assert _parse_google(shell, limit=5) == []
+
+
+def test_search_falls_through_an_empty_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A backend returning nothing looks identical to a query with no answers, so
+    without fallthrough a broken backend makes ARC look ignorant, not broken."""
+    # `import arc.web.search` returns the *function*, not the module: arc/web/__init__
+    # re-exports `search`, which rebinds the name on the package. importlib reaches the
+    # submodule regardless.
+    import importlib
+
+    search_module = importlib.import_module("arc.web.search")
+    calls: list[str] = []
+
+    def fake(backend: str, query: str, **_: object) -> list:
+        calls.append(backend)
+        if backend == "working":
+            return [SearchResult(title="t", url="https://x.dev", backend=backend)]
+        return []
+
+    monkeypatch.setattr(search_module, "search_with", fake)
+    results = search_module.search("q", backends=["empty", "working"])
+    assert calls == ["empty", "working"]
+    assert results[0].backend == "working"
+
+
+def test_search_reports_when_every_backend_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import importlib
+
+    search_module = importlib.import_module("arc.web.search")
+    monkeypatch.setattr(search_module, "search_with", lambda *a, **k: [])
+    with pytest.raises(WebError, match="no search backend returned results"):
+        search_module.search("q", backends=["a", "b"])
+
+
+def test_empty_query_is_rejected() -> None:
+    from arc.web.search import search as run
+
+    with pytest.raises(WebError, match="empty search query"):
+        run("   ")

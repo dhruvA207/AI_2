@@ -456,10 +456,12 @@ def cmd_do(args: argparse.Namespace) -> int:
     from arc.model import router
     from arc.model.registry import resolve
     from arc.tools import registry as tool_registry
+    from arc.tools import web as web_tools
 
     config = _require_config(args)
     entry = resolve(config, "chat")
     audit = _audit_logger(config)
+    web_tools.configure(config)
 
     if args.dry_run:
         print("[dry-run] mutating tools will be skipped; read-only tools still run\n")
@@ -510,10 +512,12 @@ def cmd_do(args: argparse.Namespace) -> int:
 def cmd_research(args: argparse.Namespace) -> int:
     """Research a question on the web and remember what was learned."""
     from arc.model import router
+    from arc.tools import web as web_tools
     from arc.web.research import Researcher
 
     config = _require_config(args)
     audit = _audit_logger(config)
+    web_tools.configure(config)
 
     memory = None
     if not args.no_memory and config.get("memory.enabled", True):
@@ -522,7 +526,13 @@ def cmd_research(args: argparse.Namespace) -> int:
 
     print("loading model...", file=sys.stderr)
     model = router.load_model(config, "chat")
-    researcher = Researcher(model, memory, max_pages=args.max_pages)
+    researcher = Researcher(
+        model,
+        memory,
+        fetcher=web_tools._client(),
+        max_pages=args.max_pages,
+        backends=list(config.get("web.search.backends") or []) or None,
+    )
 
     try:
         result = researcher.research(args.query, use_memory=not args.fresh)
