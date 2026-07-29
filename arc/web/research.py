@@ -114,10 +114,12 @@ class Researcher:
         fetcher: Fetcher | None = None,
         max_pages: int = 3,
         max_chunk_chars: int = 6000,
+        backends: list[str] | None = None,
     ) -> None:
         self._model = model
         self._memory = memory
         self._fetcher = fetcher or Fetcher()
+        self._backends = backends
         self._max_pages = max_pages
         self._max_chunk_chars = max_chunk_chars
 
@@ -243,7 +245,9 @@ class Researcher:
                 _log.info("answered from memory", extra={"query": query})
                 return cached
 
-        results = search(query, limit=self._max_pages * 2, fetcher=self._fetcher)
+        results = search(
+            query, limit=self._max_pages * 2, fetcher=self._fetcher, backends=self._backends
+        )
         if not results:
             return ResearchResult(query=query, summary="No search results found.")
 
