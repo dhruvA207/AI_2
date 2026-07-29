@@ -17,6 +17,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Inference backends are optional so the core install stays at one dependency.
+# The router imports these lazily and reports a clear error when one is absent.
+mlx = [
+    "mlx-lm>=0.26",        # MIT — Apple Silicon only
+    "huggingface-hub>=0.23",  # Apache-2.0 — weight downloads
+]
+llamacpp = [
+    "llama-cpp-python>=0.3",  # MIT — portable GGUF: CPU/Metal/CUDA
+    "huggingface-hub>=0.23",  # Apache-2.0
+]
 dev = [
     "pytest>=8.0",   # MIT
     "ruff>=0.6",     # MIT
@@ -47,6 +57,13 @@ strict = true
 warn_unreachable = true
 # Platform stubs deliberately raise NotImplementedError; that is not dead code.
 disallow_untyped_defs = true
+
+# Optional inference backends ship no type stubs, and two of the three cannot even be
+# installed on a given machine (MLX is Apple-Silicon-only). Ignoring them here keeps
+# --strict meaningful for our own code instead of failing on third-party gaps.
+[[tool.mypy.overrides]]
+module = ["mlx.*", "mlx_lm.*", "llama_cpp.*", "huggingface_hub.*"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,42 +1,70 @@
-# Model registry — populated in Phase 2.
+# Model registry.
 #
-# Deliberately empty of concrete entries. Per docs/BRIEF.md §3, every model's licence
-# must be verified against its live Hugging Face model card (URL + date recorded in
-# docs/DEPENDENCIES.md) before it is written here. Hardcoding from memory is exactly
-# the failure mode the brief warns about.
+# Every licence below was verified against the live Hugging Face model card on the date
+# recorded, per docs/BRIEF.md §3 — never from memory. arc/model/registry.py rejects any
+# entry whose licence is not Apache-2.0 or MIT, so this cannot drift silently.
 #
-# Confirmed preference for Track A: the Qwen3 family, pending that licence check.
-#
-# Expected shape once populated:
-#
-#   registry:
-#     qwen3-8b-instruct:
-#       backend: mlx            # mlx | llamacpp | vllm | transformers | custom
-#       repo: <hf repo id>
-#       quantization: 4-bit
-#       context_length: 32768
-#       licence: Apache-2.0
-#       licence_verified: "2026-07-27"
-#       capabilities:
-#         native_tool_calling: true
-#         vision: false
-#         json_mode: true
+# Deliberately NOT here: Llama (Meta community licence — neither Apache nor MIT), and
+# anything tagged research-only or non-commercial.
 
-registry: {}
+registry:
+  qwen3-4b-instruct:
+    backend: mlx
+    repo: mlx-community/Qwen3-4B-Instruct-2507-4bit
+    licence: Apache-2.0
+    licence_verified: "2026-07-29"
+    quantization: 4-bit
+    context_length: 32768
+    approx_size_gb: 2.3
+    capabilities:
+      # Native 262144 on the base model. Capped here: KV cache at that length would
+      # need far more memory than this machine has, and a context you cannot fill is
+      # a footgun rather than a feature. Raise it on a machine that can afford it.
+      max_context: 32768
+      native_tool_calling: true
+      json_mode: true
+      vision: false
+      thinking: false
+    notes: >-
+      Default chat model. Chosen over the 8B because this machine is a fanless MacBook
+      Air: both fit in memory, but the 4B stays responsive through a long session where
+      the 8B throttles. See docs/DECISIONS.md ADR-010.
 
-# Which registry entry to use for each role. Filled in during Phase 2.
+  qwen3-8b:
+    backend: mlx
+    repo: mlx-community/Qwen3-8B-4bit
+    licence: Apache-2.0
+    licence_verified: "2026-07-29"
+    quantization: 4-bit
+    context_length: 32768
+    approx_size_gb: 4.5
+    capabilities:
+      max_context: 32768
+      native_tool_calling: true
+      json_mode: true
+      vision: false
+      thinking: true
+    notes: >-
+      Stronger reasoning and a thinking mode, at roughly twice the weights. Fits this
+      machine's 11.5 GB but will throttle on sustained use. Prefer it for hard one-off
+      tasks rather than as the daily driver.
+
+# Which registry entry serves each role. `arc model use` writes the machine-local
+# override to ~/.arc/config.yaml so switching models never dirties the committed file.
 active:
-  chat: null
-  vision: null
-  embedding: null
+  chat: qwen3-4b-instruct
+  vision: null      # Phase 6
+  embedding: null   # Phase 3
 
 router:
-  # Pick a backend from ~/.arc/hardware.json rather than hardcoding one.
+  # Pick a backend from ~/.arc/hardware.json rather than trusting the entry blindly.
   auto_select_backend: true
-  # Explicit override; null means let the router decide.
+  # Explicit override; null means let the router decide. An override wins even on a
+  # machine that cannot support it — being able to force a wrong answer is what makes
+  # this useful for debugging.
   force_backend: null
   # Unload a model when another needs the memory. Required on this 16 GB machine,
-  # where the chat model and a VLM cannot co-reside.
+  # where a chat model and a VLM cannot co-reside.
   evict_when_constrained: true
 
 generation:

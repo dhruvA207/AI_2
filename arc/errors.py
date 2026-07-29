@@ -41,6 +41,16 @@ class HardwareProbeError(ArcError):
     """The hardware probe could not determine something downstream code depends on."""
 
 
+class ModelError(ArcError):
+    """A language model could not be loaded, or generation failed.
+
+    Covers both "the weights are missing" and "the backend blew up mid-generation".
+    The agent loop treats these as retryable at a different level than a tool error:
+    a tool failure becomes an observation the model reasons about, whereas a model
+    failure means there is nothing left to do the reasoning.
+    """
+
+
 class AuditError(ArcError):
     """The audit log could not be written.
 

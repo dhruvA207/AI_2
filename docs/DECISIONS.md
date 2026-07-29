@@ -163,3 +163,71 @@ commands run by hand, not only actions the agent took autonomously.
 **Consequence.** Audit failures are suppressed in the CLI path specifically — refusing to let
 `arc doctor` start because `~/.arc` is read-only would hide the exact diagnosis being asked
 for. Inside an agent run (Phase 4) an audit failure stays fatal.
+
+---
+
+## ADR-010 — Qwen3-4B is the default, not the 7–8B the sizing table allows
+
+**Decision.** `config/models.yaml` ships Qwen3-4B-Instruct (4-bit, 2.1 GB) as the active chat
+model, with Qwen3-8B (4-bit, 4.6 GB) available but not default.
+
+**Why.** `arc doctor` recommends 7–8B on memory grounds and then warns that this chassis is
+fanless. Both models fit in 11.5 GB usable; the difference is what happens twenty minutes into
+a session. The 4B stays responsive where the 8B throttles, and an assistant you are waiting on
+is worse than a slightly weaker one that answers.
+
+**Cost, stated plainly.** The 4B is measurably worse at reasoning. During Phase 2 testing it
+answered "17 × 23" as 491 rather than 391. Arithmetic and multi-step reasoning are exactly
+where the 8B earns its extra weight, so `arc model use qwen3-8b` is the right move for hard
+one-off tasks. Phase 3's memory and Phase 4's tools will matter more for everyday usefulness
+than this choice does.
+
+---
+
+## ADR-011 — The `LanguageModel` interface stays narrow on purpose
+
+**Decision.** `arc/model/base.py` exposes five abstract members: `name`, `generate`, `stream`,
+`count_tokens`, `context_length`, `capabilities`. Nothing else. A test asserts the exact set,
+so widening it is a deliberate act rather than a drift.
+
+**Why.** §4.1 requires that a model trained from scratch can eventually satisfy this interface.
+Every capability added here is another thing Track B must implement before its model can drive
+the agent. Logit bias, beam search, speculative decoding, and grammar-constrained output were
+all considered and left out: none is required to run the agent loop.
+
+**How variation is handled.** Capabilities that genuinely differ between models are *reported*
+via `ModelCapabilities` rather than assumed. They default to False, so a backend that declares
+nothing gets the prompted-ReAct fallback — which works everywhere — instead of silently
+emitting native tool calls that nothing parses.
+
+---
+
+## ADR-012 — Backend selection is explainable, and an override may be wrong
+
+**Decision.** `router.choose_backend()` returns a `BackendChoice` carrying the backend *and the
+reason*. Precedence: an explicit `force_backend` wins, then the entry's preferred backend if
+this machine has the accelerator, then llama.cpp as the universal fallback.
+
+**Why.** A router that silently picks differently on two machines is hard to debug. `arc model
+list` shows the reasoning, including when a choice is a fallback and what it fell back from.
+
+**Deliberate sharp edge.** `force_backend` overrides even onto a machine that cannot support
+it. Being able to force a wrong answer is what makes an override useful for debugging; a safe
+override that silently declines would be useless.
+
+---
+
+## ADR-013 — Weights live in `~/.arc/models/`, not the Hugging Face cache
+
+**Decision.** `arc model pull` downloads into `~/.arc/models/<key>/` via `snapshot_download`
+with an explicit `local_dir`, rather than letting the hub client use `~/.cache/huggingface`.
+
+**Why.** §4.2 wants `~/.arc` to be one portable, backup-able artifact. A model tucked away in
+the user's cache directory would not move with it, and the first thing a migrated install would
+do is re-download several gigabytes.
+
+**Consequence.** The router prefers the local directory and falls back to the hub repo id, so a
+model that was never pulled still loads (downloading on first use) rather than erroring. And
+`is_downloaded()` checks for actual weight files rather than directory existence — an
+interrupted download leaves a directory behind, and calling that "ready" would send the user to
+a confusing load failure instead of telling them to pull again.

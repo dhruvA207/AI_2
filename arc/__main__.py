@@ -25,7 +25,7 @@ from typing import Any, Literal
 from arc import __version__
 from arc.audit import AuditLogger, KillSwitch
 from arc.config import Config
-from arc.errors import ArcError
+from arc.errors import ArcError, ConfigError
 from arc.hardware import ModelSizing, refresh
 from arc.paths import arc_home, audit_dir, config_dir, ensure_runtime_dirs, log_dir, run_dir
 from arc.platform import HardwareInfo, get_platform, platform_name
@@ -267,6 +267,96 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def _require_config(args: argparse.Namespace) -> Config:
+    """Load config, or raise with a clear message. Used by commands that cannot proceed."""
+    return Config.load(directory=args.config_dir)
+
+
+def cmd_model(args: argparse.Namespace) -> int:
+    """Manage models: list, pull, use, remove."""
+    from arc.model import manager, router
+
+    config = _require_config(args)
+
+    if args.model_command == "list":
+        statuses = manager.status_for(config)
+        if args.json:
+            print(json.dumps([s.to_dict() for s in statuses], indent=2))
+            return 0
+        if not statuses:
+            print("no models in the registry (config/models.yaml)")
+            return 0
+
+        for status in statuses:
+            entry = status.entry
+            marks = "".join(
+                (
+                    "*" if status.active_for else " ",
+                    "↓" if status.downloaded else " ",
+                )
+            )
+            choice = router.choose_backend(entry, config)
+            backend = choice.backend
+            if choice.fallback_from:
+                backend = f"{choice.backend} (fallback from {choice.fallback_from})"
+            size = (
+                f"{status.size_on_disk_gb} GB on disk"
+                if status.size_on_disk_gb is not None
+                else f"~{entry.approx_size_gb} GB to download"
+                if entry.approx_size_gb
+                else "size unknown"
+            )
+            roles = f" [{', '.join(status.active_for)}]" if status.active_for else ""
+            print(f"{marks} {entry.key}{roles}")
+            print(f"     {entry.repo}")
+            print(f"     {backend} · {entry.licence} (verified {entry.licence_verified}) · {size}")
+        print("\n* active   ↓ downloaded")
+        return 0
+
+    if args.model_command == "pull":
+        path = manager.pull(config, args.key, force=args.force)
+        print(f"model {args.key!r} ready at {path}")
+        return 0
+
+    if args.model_command == "use":
+        target = manager.use(config, args.key, args.role)
+        print(f"{args.role} model set to {args.key!r} (written to {target})")
+        return 0
+
+    if args.model_command == "remove":
+        path = manager.remove(config, args.key)
+        print(f"removed {path}")
+        return 0
+
+    raise ConfigError(f"unknown model subcommand {args.model_command!r}")
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    """Talk to the local model."""
+    from arc.interface import chat
+    from arc.model import router
+    from arc.model.registry import resolve
+
+    config = _require_config(args)
+    entry = resolve(config, "chat")
+    choice = router.choose_backend(entry, config)
+
+    if args.dry_run:
+        print(f"[dry-run] would load {entry.key!r} via {choice.backend} ({choice.reason})")
+        return 0
+
+    print(f"loading {entry.key} via {choice.backend}...", file=sys.stderr)
+    model = router.load_model(config, "chat")
+
+    return chat.run(
+        model,
+        config,
+        backend=choice.backend,
+        system_prompt=args.system,
+        audit=_audit_logger(config),
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Construct the CLI."""
     parser = argparse.ArgumentParser(
@@ -302,6 +392,33 @@ def _build_parser() -> argparse.ArgumentParser:
     probe.set_defaults(func=cmd_probe)
     sub.add_parser("kill", help="SIGKILL every registered ARC process").set_defaults(func=cmd_kill)
     sub.add_parser("version", help="print the version").set_defaults(func=cmd_version)
+
+    model = sub.add_parser("model", help="manage local models")
+    model.set_defaults(func=cmd_model)
+    model_sub = model.add_subparsers(dest="model_command", required=True)
+
+    model_sub.add_parser("list", help="show the registry and what is downloaded")
+
+    pull = model_sub.add_parser("pull", help="download a model's weights")
+    pull.add_argument("key", help="registry key, as shown by `arc model list`")
+    pull.add_argument("--force", action="store_true", help="re-download even if already present")
+
+    use = model_sub.add_parser("use", help="select the active model for a role")
+    use.add_argument("key", help="registry key")
+    use.add_argument(
+        "--role",
+        default="chat",
+        choices=("chat", "vision", "embedding"),
+        help="which role to set (default: chat)",
+    )
+
+    remove = model_sub.add_parser("remove", help="delete a model's local weights")
+    remove.add_argument("key", help="registry key")
+
+    chat = sub.add_parser("chat", help="talk to the local model")
+    chat.add_argument("--system", default=None, help="system prompt for the session")
+    chat.set_defaults(func=cmd_chat)
+
     return parser
 
 
