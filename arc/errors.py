@@ -51,6 +51,16 @@ class ModelError(ArcError):
     """
 
 
+class MemoryError(ArcError):
+    """The memory store could not be opened, read, or written.
+
+    Named to match the subsystem rather than avoiding the builtin clash: callers
+    import it as ``from arc.errors import MemoryError`` inside modules that never
+    raise the builtin, and ``ArcMemoryError`` would be the only alias in the hierarchy
+    that did not match its subsystem.
+    """
+
+
 class AuditError(ArcError):
     """The audit log could not be written.
 

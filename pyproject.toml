@@ -62,7 +62,10 @@ disallow_untyped_defs = true
 # installed on a given machine (MLX is Apple-Silicon-only). Ignoring them here keeps
 # --strict meaningful for our own code instead of failing on third-party gaps.
 [[tool.mypy.overrides]]
-module = ["mlx.*", "mlx_lm.*", "llama_cpp.*", "huggingface_hub.*"]
+module = [
+    "mlx.*", "mlx_lm.*", "llama_cpp.*", "huggingface_hub.*",
+    "sqlite_vec.*", "onnxruntime.*", "tokenizers.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
