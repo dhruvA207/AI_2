@@ -262,6 +262,16 @@ class MemoryStore:
 
         timestamp = now()
         with self.transaction() as conn:
+            # Create the session row if the caller never opened one. Without this the
+            # foreign key rejects the insert, and because MemoryService.remember_turn
+            # deliberately swallows write failures, turns would vanish silently — the
+            # worst possible failure for a memory system.
+            if session_id is not None:
+                conn.execute(
+                    "INSERT OR IGNORE INTO sessions(id, started_at) VALUES (?, ?)",
+                    (session_id, timestamp),
+                )
+
             cursor = conn.execute(
                 """
                 INSERT INTO memories (
