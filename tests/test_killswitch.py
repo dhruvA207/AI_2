@@ -13,6 +13,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from arc.audit.killswitch import KillSwitch, ProcessEntry
 from arc.paths import run_dir
 
@@ -122,3 +124,50 @@ def test_kill_all_reaps_dead_entries(arc_home_tmp: Path) -> None:
 
 def test_kill_all_on_empty_registry(arc_home_tmp: Path) -> None:
     assert KillSwitch().kill_all() == []
+
+
+def test_arc_kill_entry_point_with_nothing_registered(
+    arc_home_tmp: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from arc.audit.killswitch import main
+
+    assert main([]) == 0
+    assert "no ARC processes registered" in capsys.readouterr().out
+
+
+def test_arc_kill_dry_run_lists_without_killing(
+    arc_home_tmp: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    switch = KillSwitch()
+    switch.register("agent")
+    from arc.audit.killswitch import main
+
+    assert main(["--dry-run"]) == 0
+    assert "[dry-run]" in capsys.readouterr().out
+    assert len(switch.registered()) == 1  # still there
+
+
+def test_arc_kill_json_output(arc_home_tmp: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from arc.audit.killswitch import main
+
+    assert main(["--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"killed": [], "reaped_stale": 0}
+
+
+def test_arc_kill_reaps_stale_entries(
+    arc_home_tmp: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_pid_file(run_dir(), "dead", dead_pid())
+    from arc.audit.killswitch import main
+
+    assert main([]) == 0
+    assert "stale PID file" in capsys.readouterr().out
+
+
+def test_arc_kill_needs_no_config(arc_home_tmp: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole point: stopping ARC must not depend on ARC being healthy, so this
+    path loads no YAML, probes no hardware, and writes no logs."""
+    monkeypatch.setenv("ARC_CONFIG_DIR", "/definitely/not/here")
+    from arc.audit.killswitch import main
+
+    assert main([]) == 0

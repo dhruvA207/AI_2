@@ -14,11 +14,12 @@ machinery, which needs OS-level input hooks that do not exist yet.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -162,3 +163,61 @@ class KillSwitch:
 
         signal.signal(signal.SIGINT, _handler)
         signal.signal(signal.SIGTERM, _handler)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point for the standalone ``arc-kill`` command.
+
+    Deliberately separate from ``arc kill``. The kill switch exists for the case where
+    ARC has wedged the machine, and at that moment the last thing you want is for
+    stopping it to depend on loading YAML, probing hardware, or the subcommand
+    dispatch working. This path imports nothing beyond the standard library and this
+    module, does no configuration, and writes no logs.
+
+    ``arc kill`` remains as a convenience alias for when things are fine.
+    """
+    parser = argparse.ArgumentParser(
+        prog="arc-kill",
+        description="SIGKILL every registered ARC process tree. Works even when ARC does not.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="list what would be killed, kill nothing"
+    )
+    parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    args = parser.parse_args(argv)
+
+    switch = KillSwitch()
+    reaped = switch.reap_stale()
+    entries = switch.registered()
+
+    if args.dry_run:
+        payload = {
+            "dry_run": True,
+            "would_kill": [{"name": e.name, "pid": e.pid} for e in entries],
+            "reaped_stale": reaped,
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            listing = ", ".join(f"{e.name}:{e.pid}" for e in entries) or "none"
+            print(f"[dry-run] would kill {len(entries)} process(es): {listing}")
+        return 0
+
+    killed = switch.kill_all()
+
+    if args.json:
+        print(json.dumps({"killed": killed, "reaped_stale": reaped}, indent=2))
+        return 0
+
+    if not killed and not reaped:
+        print("no ARC processes registered")
+    else:
+        if killed:
+            print(f"killed {len(killed)} process(es): {', '.join(str(p) for p in killed)}")
+        if reaped:
+            print(f"cleaned up {reaped} stale PID file(s)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
