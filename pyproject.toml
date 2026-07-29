@@ -36,6 +36,10 @@ dev = [
 
 [project.scripts]
 arc = "arc.__main__:main"
+# Separate entry point on purpose (BRIEF §0.3). The kill switch is for when ARC has
+# wedged the machine, so it must not depend on config loading, the hardware probe, or
+# subcommand dispatch working. `arc kill` remains as an alias for when things are fine.
+arc-kill = "arc.audit.killswitch:main"
 
 [tool.setuptools.packages.find]
 include = ["arc*"]
