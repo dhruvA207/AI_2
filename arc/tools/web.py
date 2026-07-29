@@ -26,6 +26,7 @@ _log = get_logger(__name__)
 #: per-host delay entirely.
 _fetcher: Fetcher | None = None
 _backends: list[str] | None = None
+_condense: bool = True
 
 
 def configure(config: Any) -> None:
@@ -46,6 +47,8 @@ def configure(config: Any) -> None:
         limiter=RateLimiter(float(section.get("rate_limit_delay", 1.0))),
     )
     _backends = list(search_config.get("backends") or [])
+    global _condense
+    _condense = bool(search_config.get("condense_queries", True))
 
     if not _fetcher.respect_robots:
         # Loud, once, at startup. Silently ignoring robots.txt is the kind of thing
@@ -73,7 +76,9 @@ def web_search(query: str, limit: int = 6) -> str:
         limit: How many results to return.
     """
     try:
-        results = run_search(query, limit=limit, fetcher=_client(), backends=_backends)
+        results = run_search(
+            query, limit=limit, fetcher=_client(), backends=_backends, keywords=_condense
+        )
     except WebError as exc:
         raise ToolError(str(exc)) from exc
 

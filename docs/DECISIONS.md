@@ -410,3 +410,45 @@ defeat bot detection, which is a different kind of act from ignoring a robots.tx
 directive, and is not something this project does. The disabled-compliance state is
 logged as a warning at every startup so it can never be a surprise when reading the
 audit trail later.
+
+---
+
+## ADR-020 addendum — Bing could not be made to work; DuckDuckGo restored as primary
+
+**Requested:** use Bing for everything, avoid DuckDuckGo. **Outcome:** not achievable by
+scraping. DuckDuckGo is primary again, with Bing tried second.
+
+**What was tried**, ~60 requests over four parser revisions:
+
+1. Naive `<h2><a>` matching — picked up the knowledge panel Bing renders *above* the
+   results. "Barbara Liskov substitution principle" returned Wikipedia's "Barbara
+   (given name)".
+2. Scoped to Bing's organic `<li class="b_algo">` containers. No improvement — the bad
+   results were inside them.
+3. Query condensation to keywords, on the theory that Bing degraded past ~3 content
+   words. 2/6 relevant.
+4. Advert filtering on `msockid=` / `msclkid=` tracking parameters. Still 2/6.
+
+**Why it fails.** Once Bing classifies a client as a bot it returns HTTP 200 with
+arbitrary pages and paid placements dressed as organic results. `python TypeError
+unhashable type list` returned **literotica.com**; `unhashable type list` returned
+**foxnews.com**; `what is the capital of Mongolia` returned **capitalone.com**. This is
+the worst possible failure mode — structurally valid, semantically wrong, and
+indistinguishable from a real answer unless you already know the answer. It also
+defeats backend fallthrough, which triggers on *empty* results.
+
+Occasional good hits ("rust borrow checker" → LogRocket) are entity matches that
+happen to coincide with the right answer, not evidence of it working.
+
+**Kept from the attempt:** advert filtering, `b_algo` scoping, and `condense()`. All
+are genuine improvements for when Bing does answer, and cost nothing. `condense` is
+off by default — DuckDuckGo handles natural language better than keywords.
+
+**The route that would honour the original preference.** A keyed search API — Brave
+Search, Serper, or Tavily — returns clean JSON, needs no scraping, and would let
+DuckDuckGo be dropped entirely. It costs money and sends queries to a third party,
+which is why it was not assumed. It is a small backend to add on request.
+
+**Not done, and not negotiable in this codebase:** making Bing or Google work would
+require impersonating a browser to defeat bot detection. Ignoring a robots.txt
+directive is the user's call; building evasion machinery is a different act.
