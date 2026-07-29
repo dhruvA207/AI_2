@@ -17,9 +17,11 @@ from arc.web.fetch import Fetcher, RateLimiter, _decode
 from arc.web.research import is_stale, ttl_for
 from arc.web.search import (
     SearchResult,
+    _is_advert,
     _parse_bing,
     _parse_google,
     _unwrap,
+    condense,
     search_with,
 )
 
@@ -284,9 +286,11 @@ def test_malformed_bing_payload_does_not_raise() -> None:
 
 
 def test_bing_results_are_parsed() -> None:
+    # Must sit inside a b_algo container: results outside one are knowledge-panel or
+    # sidebar entries, not organic results.
     html = (
-        '<h2><a href="https://www.bing.com/ck/a?u=a1'
-        'aHR0cHM6Ly9leGFtcGxlLmNvbS9wYWdl&ntb=1">Example Page Title</a></h2>'
+        '<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1'
+        'aHR0cHM6Ly9leGFtcGxlLmNvbS9wYWdl&ntb=1">Example Page Title</a></h2></li>'
     )
     results = _parse_bing(html, limit=5)
     assert len(results) == 1
@@ -295,7 +299,7 @@ def test_bing_results_are_parsed() -> None:
 
 
 def test_bing_internal_links_are_not_results() -> None:
-    html = '<h2><a href="https://www.bing.com/images/search?q=x">Images</a></h2>'
+    html = '<li class="b_algo"><h2><a href="https://www.bing.com/images/search?q=x">I</a></h2></li>'
     assert _parse_bing(html, limit=5) == []
 
 
@@ -357,3 +361,61 @@ def test_empty_query_is_rejected() -> None:
 
     with pytest.raises(WebError, match="empty search query"):
         run("   ")
+
+
+def test_bing_adverts_are_dropped() -> None:
+    """Bing serves paid placements *as* organic results once it decides the client is
+    a bot. Returning them would poison memory with pages unrelated to the query, and
+    they are structurally identical to real results — the tracking parameter is the
+    only reliable tell."""
+    import base64
+
+    def block(url: str) -> str:
+        encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+        return f'<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1{encoded}">T</a></h2></li>'
+
+    html = block("https://example.com/real") + block("https://ads.example/x?msockid=abc123")
+    results = _parse_bing(html, limit=5)
+    assert [r.url for r in results] == ["https://example.com/real"]
+
+
+@pytest.mark.parametrize("marker", ["msockid=abc", "msclkid=def", "syndicatedsearch.x/y"])
+def test_advert_markers_are_recognised(marker: str) -> None:
+    assert _is_advert(f"https://example.com/page?{marker}")
+
+
+def test_organic_urls_are_not_flagged_as_adverts() -> None:
+    assert not _is_advert("https://stackoverflow.com/questions/13675296/x")
+
+
+def test_bing_results_come_from_organic_containers_only() -> None:
+    """Regression: matching <h2><a> across the page picked up the knowledge panel Bing
+    renders above the results, so "Barbara Liskov substitution principle" returned
+    Wikipedia's "Barbara (given name)"."""
+    html = (
+        '<div class="tpmeta"><h2><a href="https://en.wikipedia.org/wiki/Wrong">Panel</a></h2></div>'
+        '<li class="b_algo"><h2><a href="https://example.com/right">Right</a></h2></li>'
+    )
+    assert [r.url for r in _parse_bing(html, limit=5)] == ["https://example.com/right"]
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("what is the capital of Mongolia", "capital Mongolia"),
+        ("how do I fix a segfault in C using malloc", "C using malloc"),
+        ("rust borrow checker", "rust borrow checker"),
+    ],
+)
+def test_condense_strips_stopwords_and_keeps_the_tail(query: str, expected: str) -> None:
+    """Questions front-load context and end on the specific thing being asked about."""
+    assert condense(query) == expected
+
+
+def test_condense_falls_back_when_everything_is_a_stopword() -> None:
+    """An all-stopword query is better sent as-is than sent empty."""
+    assert condense("what is the") == "what is the"
+
+
+def test_condense_on_empty_input() -> None:
+    assert condense("   ") == ""

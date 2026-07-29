@@ -10,8 +10,17 @@ fallthrough a broken backend silently makes ARC look ignorant rather than broken
 | Backend | robots.txt | Works without a browser? |
 |---|---|---|
 | ``google`` | disallows ``/search`` | **No.** Serves a JS shell; 3 links, no results. |
-| ``bing`` | disallows ``/search`` | Yes. Results wrapped in ``bing.com/ck/a?...&u=a1<base64>``. |
-| ``duckduckgo`` | **allows** ``lite/`` | Yes. |
+| ``bing`` | disallows ``/search`` | **Not reliably** — see below. |
+| ``duckduckgo`` | **allows** ``lite/`` | Yes, across every query shape tested. |
+
+Bing deserves the detail because it was requested as the default and tested hard for
+it: ~60 requests across four parser revisions, advert filtering, and query
+condensation. Once it classifies a client as a bot it returns HTTP 200 with arbitrary
+pages and paid placements presented as organic results — "python TypeError unhashable
+type list" returned literotica.com, "unhashable type list" returned foxnews.com. That
+failure mode is the worst kind: structurally valid, semantically wrong, and impossible
+to distinguish from a real answer without knowing the answer already. Adverts are now
+filtered on their tracking parameters, which helps but does not rescue it.
 
 Google and Bing are only attempted when ``web.respect_robots`` is turned off in config,
 since both disallow ``/search``. That switch is the user's to throw — §0.3 is explicit
@@ -46,7 +55,90 @@ ENDPOINTS = {
 #: disallows the search path outright.
 REQUIRES_ROBOTS_OVERRIDE = frozenset({"google", "bing"})
 
-DEFAULT_BACKENDS = ("google", "bing", "duckduckgo")
+DEFAULT_BACKENDS = ("duckduckgo", "bing")
+
+#: Words carrying no search signal, stripped by ``condense``. Deliberately small: an
+#: aggressive list mangles technical queries, where words like "not" and "in" can be
+#: part of the thing being searched for.
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "about",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "between",
+        "but",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "explain",
+        "for",
+        "from",
+        "get",
+        "had",
+        "has",
+        "have",
+        "here",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "may",
+        "me",
+        "might",
+        "must",
+        "my",
+        "of",
+        "on",
+        "or",
+        "please",
+        "shall",
+        "should",
+        "some",
+        "tell",
+        "that",
+        "the",
+        "then",
+        "there",
+        "these",
+        "this",
+        "those",
+        "to",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+    }
+)
+
+#: Bing's practical ceiling before it starts entity-matching the first keyword instead
+#: of searching. Measured, not guessed — see the module docstring.
+KEYWORD_LIMIT = 3
 
 #: Anchors are matched in two passes rather than one pattern. DuckDuckGo's markup uses
 #: single quotes for class and double for href, and puts href *before* class — a
@@ -59,7 +151,15 @@ _DDG_SNIPPET = re.compile(
     r"""<td[^>]*class\s*=\s*["'][^"']*result-snippet[^"']*["'][^>]*>(.*?)</td>""",
     re.DOTALL | re.IGNORECASE,
 )
-_BING_RESULT = re.compile(r"<h2[^>]*>\s*<a[^>]+href=\"([^\"]+)\"[^>]*>(.*?)</a>", re.DOTALL)
+#: Bing's organic results each sit in an ``<li class="b_algo">``. Scoping to that
+#: container is essential, not tidiness: matching ``<h2><a>`` across the whole page
+#: instead picks up the knowledge panel (``tpmeta``/``b_attribution``) that Bing renders
+#: *above* the results. Searching "Barbara Liskov substitution principle" that way
+#: returned Wikipedia's "Barbara (given name)", and "capital of Mongolia" returned
+#: capitalone.com — plausible-looking results that had nothing to do with the query.
+_BING_BLOCK = re.compile(r'<li[^>]+class="[^"]*\bb_algo\b[^"]*"[^>]*>(.*?)</li>', re.DOTALL)
+_BING_TITLE = re.compile(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
+_BING_SNIPPET = re.compile(r"<p[^>]*>(.*?)</p>", re.DOTALL)
 _TAGS = re.compile(r"<[^>]+>")
 
 
@@ -86,6 +186,37 @@ class SearchResult:
 def _strip(markup: str) -> str:
     """Turn a fragment of result HTML into plain text."""
     return html_module.unescape(_TAGS.sub("", markup)).strip()
+
+
+def condense(query: str, *, limit: int = KEYWORD_LIMIT) -> str:
+    """Reduce a natural-language question to search keywords.
+
+    Bing degrades badly past about three content words: instead of searching, it
+    entity-matches the first keyword. "what is the capital of Mongolia" returns
+    capitalone.com; "capital of Mongolia" returns Ulaanbaatar. Measured, not guessed.
+
+    Stopwords are dropped and the most specific terms kept. Word *order* is preserved
+    rather than reordered by any cleverness, because for technical queries the original
+    order usually already puts the specific term last where it belongs.
+
+    Falls back to the original words when stripping would leave nothing — a query that
+    is entirely stopwords is better sent as-is than sent empty.
+    """
+    words = re.findall(r"[\w+#.\-]+", query)
+    if not words:
+        return query.strip()
+
+    kept = [w for w in words if w.lower() not in _STOPWORDS]
+    if not kept:
+        kept = words
+
+    # Keep the *last* terms, not the first. Questions front-load context and end on the
+    # specific thing being asked about: "how do I fix a segfault in C using malloc"
+    # is about malloc and segfaults, not about fixing.
+    if len(kept) > limit:
+        kept = kept[-limit:]
+
+    return " ".join(kept)
 
 
 def _unwrap(href: str) -> str:
@@ -153,17 +284,57 @@ def _parse_duckduckgo(html: str, limit: int) -> list[SearchResult]:
     return results
 
 
+#: Query parameters Microsoft attaches to *paid* placements. Their presence is the one
+#: reliable way to tell a Bing ad from an organic result — without this filter, a
+#: search for "unhashable type list" returns foxnews.com with HTTP 200 and no error,
+#: which is structurally indistinguishable from a real result and so defeats the
+#: fallthrough to another backend entirely.
+_AD_MARKERS = ("msockid=", "msclkid=", "syndicatedsearch")
+
+
+def _is_advert(url: str) -> bool:
+    """Whether a result URL is a paid placement rather than an organic hit."""
+    lowered = url.lower()
+    return any(marker in lowered for marker in _AD_MARKERS)
+
+
 def _parse_bing(html: str, limit: int) -> list[SearchResult]:
-    """Parse Bing's results, which live in ``<h2><a>`` blocks."""
+    """Parse Bing's organic results from their ``b_algo`` containers.
+
+    Advertising placements are dropped. Bing serves them *as* organic results once it
+    decides the client is a bot, and returning them would poison memory with pages
+    that have nothing to do with the query.
+    """
     results: list[SearchResult] = []
-    for href, label in _BING_RESULT.findall(html):
-        target = _unwrap(href)
-        title = _strip(label)
+    seen: set[str] = set()
+
+    for block in _BING_BLOCK.findall(html):
+        title_match = _BING_TITLE.search(block)
+        if not title_match:
+            continue
+
+        target = _unwrap(title_match.group(1))
+        title = _strip(title_match.group(2))
         if not target.startswith(("http://", "https://")) or not title:
             continue
         if "bing.com" in urllib.parse.urlparse(target).netloc:
             continue  # An internal link that did not decode; not a result.
-        results.append(SearchResult(title=title, url=target, backend="bing"))
+        if _is_advert(target):
+            _log.debug("dropping bing advert: %s", target[:80])
+            continue
+        if target in seen:
+            continue
+        seen.add(target)
+
+        snippet_match = _BING_SNIPPET.search(block)
+        results.append(
+            SearchResult(
+                title=title,
+                url=target,
+                snippet=_strip(snippet_match.group(1))[:300] if snippet_match else "",
+                backend="bing",
+            )
+        )
         if len(results) >= limit:
             break
     return results
@@ -235,8 +406,12 @@ def search(
     limit: int = 8,
     fetcher: Fetcher | None = None,
     backends: tuple[str, ...] | list[str] | None = None,
+    keywords: bool = True,
 ) -> list[SearchResult]:
     """Search the web, trying each configured backend until one returns results.
+
+    ``keywords`` condenses a natural-language question to search terms first, which is
+    what makes Bing usable — see ``condense``. Turn it off to send the query verbatim.
 
     Falls through on an empty result as well as on an error. A backend that returns
     nothing looks exactly like a query with no answers, so without fallthrough a broken
@@ -248,11 +423,14 @@ def search(
 
     client = fetcher or Fetcher()
     order = list(backends or DEFAULT_BACKENDS)
+    terms = condense(query) if keywords else query
+    if terms != query:
+        _log.info("condensed query", extra={"from": query, "to": terms})
     failures: list[str] = []
 
     for backend in order:
         try:
-            results = search_with(backend, query, limit=limit, fetcher=client)
+            results = search_with(backend, terms, limit=limit, fetcher=client)
         except WebError as exc:
             failures.append(f"{backend}: {exc}")
             _log.info("search backend %s unavailable: %s", backend, exc)
