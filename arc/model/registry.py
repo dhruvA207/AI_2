@@ -62,15 +62,21 @@ class ModelEntry:
         }
 
 
-def _parse_capabilities(raw: dict[str, Any], context_length: int) -> ModelCapabilities:
+def _parse_capabilities(key: str, raw: Any, context_length: int) -> ModelCapabilities:
     """Build capabilities from a registry entry, defaulting conservatively.
 
     Anything unspecified is False. A backend that forgets to declare tool calling gets
     the prompted-ReAct fallback, which works everywhere, rather than emitting native
     tool calls nothing is parsing.
     """
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"model {key!r} field 'capabilities' must be a mapping, got {type(raw).__name__}"
+        )
     return ModelCapabilities(
-        max_context=int(raw.get("max_context", context_length)),
+        max_context=_as_int(
+            key, "capabilities.max_context", raw.get("max_context", context_length)
+        ),
         native_tool_calling=bool(raw.get("native_tool_calling", False)),
         vision=bool(raw.get("vision", False)),
         json_mode=bool(raw.get("json_mode", False)),
@@ -78,8 +84,39 @@ def _parse_capabilities(raw: dict[str, Any], context_length: int) -> ModelCapabi
     )
 
 
-def parse_entry(key: str, raw: dict[str, Any]) -> ModelEntry:
+def _as_int(key: str, field_name: str, value: Any) -> int:
+    """Coerce a config value to int, reporting the offending key on failure.
+
+    Without this, ``context_length: "abc"`` escapes as a bare ``ValueError`` that the
+    CLI's ``ArcError`` handler does not catch, so the user gets a traceback instead of
+    a message naming the field.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"model {key!r} field {field_name!r} must be a number, got {value!r}"
+        ) from exc
+
+
+def _as_float(key: str, field_name: str, value: Any) -> float:
+    """Coerce a config value to float, reporting the offending key on failure."""
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(
+            f"model {key!r} field {field_name!r} must be a number, got {value!r}"
+        ) from exc
+
+
+def parse_entry(key: str, raw: Any) -> ModelEntry:
     """Validate and build one entry, raising ``ConfigError`` on anything malformed."""
+    # Checked before the field loop because `"backend" not in raw` is a *substring*
+    # test on a string and a TypeError on None, so a malformed entry would otherwise
+    # produce either a misleading "missing required field" or an uncaught crash.
+    if not isinstance(raw, dict):
+        raise ConfigError(f"model {key!r} must be a mapping of fields, got {type(raw).__name__}")
+
     for required in ("backend", "repo", "licence", "licence_verified", "context_length"):
         if required not in raw:
             raise ConfigError(f"model {key!r} is missing required field {required!r}")
@@ -98,19 +135,23 @@ def parse_entry(key: str, raw: dict[str, Any]) -> ModelEntry:
             f"Only {sorted(_ALLOWED_LICENCES)} are permitted."
         )
 
+    context_length = _as_int(key, "context_length", raw["context_length"])
+
     return ModelEntry(
         key=key,
         backend=backend,
         repo=str(raw["repo"]),
         licence=licence,
         licence_verified=str(raw["licence_verified"]),
-        context_length=int(raw["context_length"]),
+        context_length=context_length,
         quantization=raw.get("quantization"),
         approx_size_gb=(
-            float(raw["approx_size_gb"]) if raw.get("approx_size_gb") is not None else None
+            _as_float(key, "approx_size_gb", raw["approx_size_gb"])
+            if raw.get("approx_size_gb") is not None
+            else None
         ),
         filename=raw.get("filename"),
-        capabilities=_parse_capabilities(raw.get("capabilities") or {}, int(raw["context_length"])),
+        capabilities=_parse_capabilities(key, raw.get("capabilities") or {}, context_length),
         notes=raw.get("notes"),
     )
 

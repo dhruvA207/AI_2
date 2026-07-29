@@ -150,6 +150,45 @@ active:
     assert active_key(config) == "a"
 
 
+@pytest.mark.parametrize("value", ["just a string", [1, 2, 3], None, 5, True])
+def test_non_mapping_entry_is_reported_clearly(value: object) -> None:
+    """Regression: `"backend" not in raw` is a substring test on a string and a
+    TypeError on None, so a malformed entry used to produce either a misleading
+    "missing required field" or an uncaught crash."""
+    with pytest.raises(ConfigError, match="must be a mapping of fields"):
+        parse_entry("m", value)
+
+
+@pytest.mark.parametrize("value", ["abc", None, [1], {}])
+def test_non_numeric_context_length_raises_config_error(value: object) -> None:
+    """Regression: int("abc") raised a bare ValueError that escaped the CLI's
+    ArcError handler, so the user saw a traceback instead of the field name."""
+    with pytest.raises(ConfigError, match="context_length"):
+        parse_entry("m", {**MINIMAL, "context_length": value})
+
+
+def test_non_numeric_size_raises_config_error() -> None:
+    with pytest.raises(ConfigError, match="approx_size_gb"):
+        parse_entry("m", {**MINIMAL, "approx_size_gb": "big"})
+
+
+def test_non_mapping_capabilities_raises_config_error() -> None:
+    with pytest.raises(ConfigError, match="capabilities"):
+        parse_entry("m", {**MINIMAL, "capabilities": "yes please"})
+
+
+def test_non_numeric_max_context_raises_config_error() -> None:
+    with pytest.raises(ConfigError, match="max_context"):
+        parse_entry("m", {**MINIMAL, "capabilities": {"max_context": "lots"}})
+
+
+def test_malformed_entry_in_registry_names_the_key(config_dir: Path) -> None:
+    """The error must name which entry is broken, not just that something is."""
+    config = write_models(config_dir, "registry:\n  broken: null\n")
+    with pytest.raises(ConfigError, match="'broken'"):
+        load_registry(config)
+
+
 def test_committed_registry_is_valid() -> None:
     """The real config/models.yaml must parse and satisfy the licence rule."""
     registry = load_registry(Config.load(use_env=False))

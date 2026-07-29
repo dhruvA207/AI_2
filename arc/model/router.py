@@ -112,9 +112,14 @@ def _source_for(entry: ModelEntry) -> str:
     ARC working offline. Falling back to the repo id means a model that was never
     pulled still loads, downloading on first use rather than erroring.
     """
-    path = model_path(entry)
-    if path.is_dir() and any(path.glob("*.safetensors")):
-        return str(path)
+    # Delegates to the manager's check rather than globbing for one extension, so
+    # "downloaded" means the same thing here as it does in `arc model list`. They
+    # disagreed previously: an MLX model shipped as .npz listed as downloaded but was
+    # still re-fetched from the hub on load.
+    from arc.model.manager import is_downloaded
+
+    if is_downloaded(entry):
+        return str(model_path(entry))
     return entry.repo
 
 
