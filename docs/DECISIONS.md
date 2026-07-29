@@ -231,3 +231,65 @@ model that was never pulled still loads (downloading on first use) rather than e
 `is_downloaded()` checks for actual weight files rather than directory existence — an
 interrupted download leaves a directory behind, and calling that "ready" would send the user to
 a confusing load failure instead of telling them to pull again.
+
+---
+
+## ADR-014 — bge-small via ONNX Runtime, not PyTorch
+
+**Decision.** Embeddings come from BAAI/bge-small-en-v1.5 (MIT) run through ONNX Runtime
+with the HuggingFace `tokenizers` library. Not sentence-transformers, not PyTorch, not MLX.
+
+**Why.**
+
+- **Cross-platform.** The same ONNX file and the same code run on Apple Silicon, Windows,
+  and Linux. MLX would be faster here but exists only on Macs, and Track A is supposed to
+  survive the Windows move without a rewrite (§2).
+- **Weight.** onnxruntime is ~19 MB and tokenizers ~3 MB. PyTorch is ~2.5 GB — an absurd
+  price to embed short strings with a 33M-parameter model (§7).
+- **Fully local.** No embedding API calls, per §3.
+
+**Detail that is easy to get wrong.** bge uses the CLS token as the sentence
+representation, not mean pooling, and prefixes *queries* (not stored passages) with
+"Represent this sentence for searching relevant passages:". Getting either wrong produces
+vectors that look fine and retrieve badly — the worst kind of wrong, because nothing errors.
+
+**Measured.** 384 dimensions, unit-normalised, 12 ms per batch of 4 on the M3.
+
+---
+
+## ADR-015 — Consolidation is conservative by default
+
+**Decision.** Dedupe only above 0.97 cosine similarity, decay 1% per day, promote after 3
+recurrences across at least 2 sessions, and **pruning is off entirely**. Merged and
+summarised memories are superseded, never deleted.
+
+**Why.** Consolidation rewrites memory in the background without being asked. The two
+failure modes are not symmetric: being too cautious costs disk space, while being too
+aggressive destroys things silently and you only discover it when a question that should
+have had an answer doesn't. §4.2 also forbids silent memory mutation outright, which
+supersede-don't-delete satisfies directly.
+
+Every threshold is in `config/default.yaml` and meant to be turned up once there is
+evidence of what these actually do to a real corpus.
+
+**Ordering matters more than it looks.** Promotion must run *before* dedupe. Promotion's
+signal is a phrase recurring across sessions; identical text embeds identically, so it is
+the first thing dedupe collapses. Running dedupe first left one live copy of every repeated
+request and promotion silently never fired.
+
+---
+
+## ADR-016 — Recalled memories go in the system message
+
+**Decision.** Retrieved memories are rendered into the system prompt, not replayed as
+synthetic prior conversation turns.
+
+**Why.** A fabricated exchange is indistinguishable, to the model, from something the user
+actually said. It would start attributing its own recollections to them — "you told me
+X" when X came from a web page. The system message keeps the provenance boundary intact,
+and rendering source URLs and confidence alongside each memory is what lets ARC cite where
+a fact came from when asked (§4.4).
+
+**Consequence.** `/why` exposes the retrieval provenance — score and which of the four
+strategies found each memory — because "why did it say that?" is the first question when
+memory misbehaves, and the answer needs more than the result list.
