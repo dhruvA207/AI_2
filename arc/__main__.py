@@ -424,6 +424,89 @@ def cmd_memory(args: argparse.Namespace) -> int:
         memory.close()
 
 
+def cmd_tools(args: argparse.Namespace) -> int:
+    """List the tools available to the agent."""
+    from arc.tools import registry as tool_registry
+
+    described = tool_registry.describe()
+    if args.json:
+        print(json.dumps(described, indent=2))
+        return 0
+
+    by_category: dict[str, list[dict[str, Any]]] = {}
+    for entry in described:
+        by_category.setdefault(entry["category"], []).append(entry)
+
+    print(f"\n{len(described)} tools available\n")
+    for category in sorted(by_category):
+        print(f"{category}:")
+        for entry in by_category[category]:
+            marker = "*" if entry["mutating"] else " "
+            required = entry["parameters"].get("required", [])
+            signature = ", ".join(required)
+            print(f"  {marker} {entry['name']}({signature})")
+            print(f"      {entry['description']}")
+    print("\n* mutating — skipped under --dry-run\n")
+    return 0
+
+
+def cmd_do(args: argparse.Namespace) -> int:
+    """Run a multi-step task with tools."""
+    from arc.agent.loop import Agent, Step
+    from arc.model import router
+    from arc.model.registry import resolve
+    from arc.tools import registry as tool_registry
+
+    config = _require_config(args)
+    entry = resolve(config, "chat")
+    audit = _audit_logger(config)
+
+    if args.dry_run:
+        print("[dry-run] mutating tools will be skipped; read-only tools still run\n")
+
+    print(f"loading {entry.key}...", file=sys.stderr)
+    model = router.load_model(config, "chat")
+
+    memory = None
+    if not args.no_memory and config.get("memory.enabled", True):
+        with contextlib.suppress(ArcError):
+            memory = _memory_service(config, audit)
+
+    def show(step: Step) -> None:
+        observation = step.observation
+        status = "ok" if observation and observation.ok else "failed"
+        print(f"  [{step.number}] {step.tool} -> {status}", file=sys.stderr)
+        if step.repairs:
+            # Surfaced because repeated repairs mean the model is emitting malformed
+            # output, which is worth knowing before blaming the agent.
+            print(f"      (parser repaired: {', '.join(step.repairs)})", file=sys.stderr)
+
+    agent = Agent(
+        model,
+        tool_registry,
+        memory=memory,
+        audit=audit,
+        max_steps=args.max_steps,
+        dry_run=args.dry_run,
+        on_step=None if args.json else show,
+    )
+
+    try:
+        result = agent.run(args.task)
+    finally:
+        if memory is not None:
+            memory.close()
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0
+
+    print(f"\n{result.answer}\n")
+    if result.exhausted:
+        print(f"(stopped after {args.max_steps} steps without finishing)", file=sys.stderr)
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Talk to the local model."""
     from arc.interface import chat
@@ -550,6 +633,21 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         help="report what would change without changing it",
     )
+
+    tools = sub.add_parser("tools", help="list the tools available to the agent")
+    tools.set_defaults(func=cmd_tools)
+
+    do = sub.add_parser("do", help="run a multi-step task using tools")
+    do.add_argument("task", help="what to do, in plain language")
+    do.add_argument(
+        "--max-steps",
+        type=int,
+        default=12,
+        dest="max_steps",
+        help="give up after this many tool calls (default: 12)",
+    )
+    do.add_argument("--no-memory", action="store_true", help="run without long-term memory")
+    do.set_defaults(func=cmd_do)
 
     chat = sub.add_parser("chat", help="talk to the local model")
     chat.add_argument("--system", default=None, help="system prompt for the session")
