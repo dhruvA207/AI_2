@@ -32,6 +32,61 @@ audit:
   # cannot make the log unreadable.
   max_field_chars: 4000
 
+memory:
+  enabled: true
+  # One SQLite file, no server, so the whole memory is a single backup-able artifact
+  # that survives the macOS -> Windows move by being copied (BRIEF §4.2).
+  # null means ~/.arc/memory.db
+  path: null
+
+  embedder:
+    # BAAI/bge-small-en-v1.5 via ONNX Runtime. MIT, 33M params, CPU-only, and
+    # cross-platform — MLX would be faster but exists only on Apple Silicon, and
+    # Track A has to survive the Windows move. See docs/DECISIONS.md ADR-014.
+    repo: BAAI/bge-small-en-v1.5
+    dimension: 384
+    max_tokens: 512
+
+  retrieval:
+    # How many memories to inject into a chat turn.
+    limit: 6
+    # Candidates each strategy contributes before fusion.
+    per_strategy: 20
+    # Reciprocal Rank Fusion weights. Vector leads because paraphrase is the common
+    # case; recency is lowest because it is a tiebreaker, not evidence of relevance.
+    weights:
+      vector: 1.0
+      keyword: 0.8
+      graph: 0.7
+      recency: 0.4
+
+  working:
+    # Tokens held back for the reply. The rest is split between the sections below.
+    reserve_for_reply: 1024
+    # Fractions of the usable window. They need not sum to 1.0; the remainder is
+    # slack that stops a slightly-wrong token estimate becoming a failed generation.
+    system: 0.10
+    procedural: 0.10
+    retrieved: 0.35
+    history: 0.35
+
+  consolidation:
+    # Runs on demand via `arc memory consolidate`. Deliberately conservative: this
+    # rewrites memories in the background, and being too timid costs disk while being
+    # too aggressive destroys things silently. Turn these up once there is evidence
+    # of what they do to a real corpus.
+    enabled: true
+    # Cosine similarity above which two memories are treated as the same thing.
+    dedupe_threshold: 0.97
+    # Daily salience multiplier for unretrieved memories; 0.99 halves in ~69 days.
+    decay_per_day: 0.99
+    prune_below: 0.05
+    summarize_after_turns: 20
+    promote_after: 3
+    max_per_run: 500
+    # Pruning permanently deletes. Decay is reversible; this is not.
+    allow_prune: false
+
 hardware:
   # Re-probe on startup rather than trusting a cached file. Cheap (~1s) and the
   # machine genuinely changes: external GPUs, memory pressure, OS upgrades.

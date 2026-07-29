@@ -331,6 +331,99 @@ def cmd_model(args: argparse.Namespace) -> int:
     raise ConfigError(f"unknown model subcommand {args.model_command!r}")
 
 
+def _memory_service(config: Config, audit: AuditLogger | None = None) -> Any:
+    """Build the memory service, or raise a clear error if it is unavailable."""
+    from arc.memory.service import MemoryService
+
+    return MemoryService.from_config(config, audit=audit)
+
+
+def cmd_memory(args: argparse.Namespace) -> int:
+    """Inspect and manage long-term memory."""
+    config = _require_config(args)
+    memory = _memory_service(config, _audit_logger(config))
+
+    try:
+        if args.memory_command == "stats":
+            stats = memory.stats()
+            if args.json:
+                print(json.dumps(stats, indent=2))
+            else:
+                print(f"\n{stats['live_memories']} live memories in {stats['path']}")
+                print(f"  size        {stats['size_mb']} MB")
+                print(f"  embedder    {stats['embedder']} ({stats['dimension']}d)")
+                print(f"  embedded    {stats['embedded']}")
+                print(f"  superseded  {stats['superseded']}")
+                for layer, count in sorted(stats["by_layer"].items()):
+                    print(f"  {layer:11} {count}")
+                print(f"  entities    {stats['entities']} ({stats['relations']} relations)")
+                print(f"  sessions    {stats['sessions']}\n")
+            return 0
+
+        if args.memory_command == "search":
+            hits = memory.retriever.search(args.query, limit=args.limit)
+            if args.json:
+                print(json.dumps([h.to_dict() for h in hits], indent=2))
+                return 0
+            if not hits:
+                print("no matches")
+                return 0
+            for hit in hits:
+                record = hit.record
+                strategies = ", ".join(hit.sources)
+                print(f"\n[{record.id}] {record.layer}/{record.kind}  score {hit.score:.4f}")
+                print(f"  {record.content}")
+                print(f"  found by: {strategies} · {record.occurred_at[:16]}")
+                if record.source_url:
+                    print(f"  source: {record.source_url}")
+            print()
+            return 0
+
+        if args.memory_command == "add":
+            memory_id = memory.semantic.add_fact(args.text, source="user")
+            print(f"stored as memory {memory_id}")
+            return 0
+
+        if args.memory_command == "forget":
+            record = memory.store.get(args.id)
+            if record is None:
+                print(f"no memory with id {args.id}", file=sys.stderr)
+                return 1
+            if not args.yes:
+                print(f"would permanently delete [{args.id}] {record.content[:70]}")
+                print("re-run with --yes to confirm")
+                return 0
+            memory.store.forget(args.id)
+            print(f"deleted memory {args.id}")
+            return 0
+
+        if args.memory_command == "export":
+            records = [r.to_dict() for r in memory.store.iter_all()]
+            payload = json.dumps(records, indent=2)
+            if args.output:
+                Path(args.output).write_text(payload, encoding="utf-8")
+                print(f"exported {len(records)} memories to {args.output}")
+            else:
+                print(payload)
+            return 0
+
+        if args.memory_command == "consolidate":
+            report = memory.consolidator.run(dry_run=args.dry_run)
+            if args.json:
+                print(json.dumps(report.to_dict(), indent=2))
+            else:
+                prefix = "[dry-run] would have " if args.dry_run else ""
+                print(
+                    f"{prefix}deduped {report.deduped}, decayed {report.decayed}, "
+                    f"promoted {report.promoted}, pruned {report.pruned}"
+                )
+            return 0
+
+        raise ConfigError(f"unknown memory subcommand {args.memory_command!r}")
+    finally:
+        memory.close()
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Talk to the local model."""
     from arc.interface import chat
@@ -347,14 +440,29 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     print(f"loading {entry.key} via {choice.backend}...", file=sys.stderr)
     model = router.load_model(config, "chat")
+    audit = _audit_logger(config)
 
-    return chat.run(
-        model,
-        config,
-        backend=choice.backend,
-        system_prompt=args.system,
-        audit=_audit_logger(config),
-    )
+    memory = None
+    if not args.no_memory and config.get("memory.enabled", True):
+        try:
+            memory = _memory_service(config, audit)
+        except ArcError as exc:
+            # Chat without memory beats no chat at all. Reported rather than swallowed
+            # so a broken database does not look like a feature that silently vanished.
+            print(f"memory unavailable ({exc}); continuing without it", file=sys.stderr)
+
+    try:
+        return chat.run(
+            model,
+            config,
+            backend=choice.backend,
+            system_prompt=args.system,
+            audit=audit,
+            memory=memory,
+        )
+    finally:
+        if memory is not None:
+            memory.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -415,8 +523,41 @@ def _build_parser() -> argparse.ArgumentParser:
     remove = model_sub.add_parser("remove", help="delete a model's local weights")
     remove.add_argument("key", help="registry key")
 
+    mem = sub.add_parser("memory", help="inspect and manage long-term memory")
+    mem.set_defaults(func=cmd_memory)
+    mem_sub = mem.add_subparsers(dest="memory_command", required=True)
+
+    mem_sub.add_parser("stats", help="summarise what is stored")
+
+    search = mem_sub.add_parser("search", help="hybrid search across all layers")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=10)
+
+    add = mem_sub.add_parser("add", help="store a fact directly")
+    add.add_argument("text")
+
+    forget = mem_sub.add_parser("forget", help="permanently delete a memory")
+    forget.add_argument("id", type=int)
+    forget.add_argument("--yes", action="store_true", help="confirm; without it this is a dry run")
+
+    export = mem_sub.add_parser("export", help="dump every memory as JSON")
+    export.add_argument("--output", default=None, help="write to a file instead of stdout")
+
+    consolidate = mem_sub.add_parser("consolidate", help="run dedupe, decay, and promotion passes")
+    consolidate.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="report what would change without changing it",
+    )
+
     chat = sub.add_parser("chat", help="talk to the local model")
     chat.add_argument("--system", default=None, help="system prompt for the session")
+    chat.add_argument(
+        "--no-memory",
+        action="store_true",
+        help="run without long-term memory for this session",
+    )
     chat.set_defaults(func=cmd_chat)
 
     return parser
