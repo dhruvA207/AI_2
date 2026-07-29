@@ -507,6 +507,43 @@ def cmd_do(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research(args: argparse.Namespace) -> int:
+    """Research a question on the web and remember what was learned."""
+    from arc.model import router
+    from arc.web.research import Researcher
+
+    config = _require_config(args)
+    audit = _audit_logger(config)
+
+    memory = None
+    if not args.no_memory and config.get("memory.enabled", True):
+        with contextlib.suppress(ArcError):
+            memory = _memory_service(config, audit)
+
+    print("loading model...", file=sys.stderr)
+    model = router.load_model(config, "chat")
+    researcher = Researcher(model, memory, max_pages=args.max_pages)
+
+    try:
+        result = researcher.research(args.query, use_memory=not args.fresh)
+    finally:
+        if memory is not None:
+            memory.close()
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0
+
+    origin = "from memory" if result.from_memory else f"read {result.pages_read} page(s)"
+    print(f"\n{result.summary}\n")
+    print(f"— {origin}", file=sys.stderr)
+    for source in dict.fromkeys(result.sources):
+        print(f"  {source}", file=sys.stderr)
+    if result.memory_ids:
+        print(f"  stored {len(result.memory_ids)} facts in memory", file=sys.stderr)
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Talk to the local model."""
     from arc.interface import chat
@@ -648,6 +685,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     do.add_argument("--no-memory", action="store_true", help="run without long-term memory")
     do.set_defaults(func=cmd_do)
+
+    research = sub.add_parser("research", help="research a question on the web")
+    research.add_argument("query", help="what to find out")
+    research.add_argument(
+        "--max-pages", type=int, default=3, dest="max_pages", help="how many pages to read"
+    )
+    research.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore stored answers and go to the network",
+    )
+    research.add_argument("--no-memory", action="store_true", help="do not store what is learned")
+    research.set_defaults(func=cmd_research)
 
     chat = sub.add_parser("chat", help="talk to the local model")
     chat.add_argument("--system", default=None, help="system prompt for the session")

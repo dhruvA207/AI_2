@@ -41,6 +41,15 @@ class HardwareProbeError(ArcError):
     """The hardware probe could not determine something downstream code depends on."""
 
 
+class WebError(ArcError):
+    """A page could not be fetched, or was refused.
+
+    Covers network failures, HTTP errors, and robots.txt refusals alike. All of them
+    are things the agent should report and route around rather than crash on, so they
+    surface as observations the same way tool errors do.
+    """
+
+
 class ToolError(ArcError):
     """A tool could not run, or ran and failed.
 

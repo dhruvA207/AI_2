@@ -8,7 +8,7 @@ Access is unrestricted by design (§0.3) — no permission prompts, no deny-list
 safeguards are the audit log, the kill switch, and ``--dry-run``.
 """
 
-from arc.tools import filesystem, shell  # noqa: F401 - imported for registration
+from arc.tools import filesystem, shell, web  # noqa: F401 - imported for registration
 from arc.tools.registry import Tool, ToolRegistry, registry, tool
 
 __all__ = ["Tool", "ToolRegistry", "registry", "tool"]
