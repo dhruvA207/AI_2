@@ -209,11 +209,18 @@ class MLXModel(LanguageModel):
         from mlx_lm import stream_generate
 
         prompt = self._render(messages, tools)
-        # Longest stop sequence determines how much tail we must withhold.
-        hold = max((len(s) for s in stop if s), default=0) - 1 if stop else 0
+        # Longest stop sequence determines how much tail we must withhold. Clamped at
+        # zero so a degenerate stop list (only empty strings) withholds nothing rather
+        # than computing a negative hold.
+        hold = max(max((len(s) for s in stop if s), default=0) - 1, 0) if stop else 0
 
         accumulated = ""
         emitted = 0
+        # Why generation ended, captured from the backend rather than assumed. Without
+        # this the withheld-tail flush below would report "stop" for a run that
+        # actually hit max_tokens, and a caller cannot distinguish a finished answer
+        # from one truncated mid-sentence.
+        ended: FinishReason = "stop"
 
         try:
             for response in stream_generate(
@@ -240,6 +247,7 @@ class MLXModel(LanguageModel):
                         emitted = safe
 
                     if response.finish_reason:
+                        ended = _FINISH_REASONS.get(response.finish_reason, "stop")
                         break
                     continue
 
@@ -248,9 +256,10 @@ class MLXModel(LanguageModel):
         except Exception as exc:
             raise ModelError(f"generation failed on {self._name!r}: {exc}") from exc
 
-        # Generation ended without hitting a stop sequence: flush whatever was withheld.
+        # Generation ended without hitting a stop sequence: flush whatever was withheld,
+        # reporting why it really ended rather than assuming a clean stop.
         if stop:
-            yield Token(text=accumulated[emitted:], finish_reason="stop")
+            yield Token(text=accumulated[emitted:], finish_reason=ended)
 
     @staticmethod
     def _first_stop(text: str, stop: list[str]) -> int | None:
