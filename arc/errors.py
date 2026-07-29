@@ -41,6 +41,15 @@ class HardwareProbeError(ArcError):
     """The hardware probe could not determine something downstream code depends on."""
 
 
+class ToolError(ArcError):
+    """A tool could not run, or ran and failed.
+
+    The one error class the agent loop treats as *recoverable*: it is fed back to the
+    model as an observation so it can adapt, rather than aborting the task. That is
+    the distinction the whole hierarchy exists to draw (see the module docstring).
+    """
+
+
 class ModelError(ArcError):
     """A language model could not be loaded, or generation failed.
 
