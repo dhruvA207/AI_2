@@ -1,13 +1,13 @@
 # Architecture
 
-**What exists today, at the end of Phase 1.** The aspirational full tree lives in
+**What exists today, at the end of Phase 2.** The aspirational full tree lives in
 `docs/BRIEF.md` §4; this file describes only what is built, so it can be trusted.
 
 ## Current state
 
 ```
 arc/
-├── __main__.py      CLI entry point — doctor, probe, kill, version
+├── __main__.py      CLI — doctor, probe, kill, version, model, chat
 ├── config.py        layered YAML + env configuration
 ├── errors.py        exception hierarchy
 ├── hardware.py      probe → sizing recommendation → hardware.json
@@ -16,6 +16,15 @@ arc/
 ├── audit/
 │   ├── logger.py    append-only action log
 │   └── killswitch.py PID registry + SIGKILL
+├── model/           ── THE SWAPPABLE BRAIN ──
+│   ├── base.py      LanguageModel ABC — five members, deliberately narrow
+│   ├── registry.py  models.yaml → typed entries, licence enforced
+│   ├── router.py    backend selection from hardware.json
+│   ├── manager.py   pull / status / use / remove
+│   ├── mlx_backend.py   Apple Silicon fast path
+│   └── llamacpp.py      portable GGUF (CPU/Metal/CUDA)
+├── interface/
+│   └── chat.py      streaming REPL
 └── platform/
     ├── base.py      Platform ABC + HardwareInfo
     ├── macos.py     implemented
@@ -23,11 +32,11 @@ arc/
     └── linux.py     stub
 
 config/    default.yaml, models.yaml, policy.yaml, training.yaml
-tests/     109 tests
+tests/     201 tests
 ```
 
-Not built yet: `model/` (Phase 2), `memory/` (Phase 3), `tools/` and `agent/` (Phase 4),
-`vision/` (Phase 6), `interface/` (Phase 7), `training/` (Track B).
+Not built yet: `memory/` (Phase 3), `tools/` and `agent/` (Phase 4), `vision/` (Phase 6),
+`interface/server.py` (Phase 7), `training/` (Track B).
 
 ## The two load-bearing abstractions
 
@@ -53,11 +62,26 @@ This is already paying off: `KillSwitch` calls `platform.kill_process_tree()` ra
 platform call. That keeps the dependency pointing one way (`hardware → platform`) instead of
 forming a cycle.
 
-### 2. `arc/model/` — the swappable brain (Phase 2)
+### 2. `arc/model/` — the swappable brain
 
-Not built yet, but every Phase 1 decision was made with it in mind. `LanguageModel` (§4.1) will
-be the narrowest interface that a from-scratch model could plausibly satisfy, and the backend
-gets chosen from `hardware.json` rather than hardcoded.
+`LanguageModel` is the narrowest interface a from-scratch model could plausibly satisfy: five
+members, and a test asserts the exact set so it cannot widen by accident (ADR-011). Everything
+above it — the REPL now, the agent loop in Phase 4 — is written against this and nothing else.
+
+```
+caller → router.load_model(config, role)
+              ├─ registry.resolve()      which model? (models.yaml + ~/.arc/config.yaml)
+              ├─ choose_backend()        which backend? (hardware.json + config)
+              └─ lazy import             MLXModel | LlamaCppModel
+```
+
+Backends are imported lazily and only inside `router.load_model`. That is what lets
+`arc model list` run on a machine with no backend installed, and it is what will keep
+`import arc.model` working on Windows where MLX cannot exist.
+
+Model capabilities that genuinely vary are *reported*, not assumed. `ModelCapabilities` defaults
+everything to False, so a backend that declares nothing gets the safe path — this is the hook
+Phase 4's executor uses to fall back from native tool calling to prompted ReAct.
 
 ## Data flow at startup
 

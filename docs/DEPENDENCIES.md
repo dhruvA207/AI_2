@@ -20,8 +20,26 @@ Before adding anything, the question is whether fifty lines of our own code woul
 |---|---|---|---|
 | PyYAML | 6.0.3 | MIT | Config files. Writing a YAML parser is not a good use of anyone's time, and `json`-only config would make `config/*.yaml` unpleasant to hand-edit. |
 
-That is the entire runtime dependency list at Phase 1. Everything else — CLI parsing, JSON,
-paths, process control, threading, hardware probing — is standard library.
+That is still the entire *required* dependency list after Phase 2. Everything else — CLI
+parsing, JSON, paths, process control, threading, hardware probing — is standard library.
+
+## Optional dependencies — inference backends
+
+Deliberately optional, installed as extras. Two of the three cannot even exist on a given
+machine (MLX is Apple-Silicon-only, vLLM needs CUDA), and `arc model list` must work on a
+machine with no backend at all. `arc/model/router.py` imports these lazily and reports a clear
+error when one is missing.
+
+```bash
+pip install 'arc[mlx]'       # Apple Silicon
+pip install 'arc[llamacpp]'  # anywhere
+```
+
+| Package | Version | Licence | Verified | Why it is here |
+|---|---|---|---|---|
+| mlx-lm | 0.31.3 | MIT | 2026-07-28 | Apple Silicon fast path. Unified memory means no host-to-device copy; measurably faster than llama.cpp's Metal path on this machine. |
+| llama-cpp-python | — | MIT | 2026-07-28 | Portable GGUF backend: CPU, Metal, and CUDA. The backend that survives the Windows move unchanged. |
+| huggingface-hub | 1.25.1 | Apache-2.0 | 2026-07-29 | Weight downloads for `arc model pull`. Pulled in transitively by mlx-lm anyway. |
 
 ## Development dependencies
 
@@ -61,10 +79,17 @@ here as a **conscious, brief-sanctioned exception** rather than quietly waved th
 Every model's licence is verified against its **live Hugging Face model card** before being
 written into `config/models.yaml` — never from memory, ours or anyone's (§3).
 
+`arc/model/registry.py` enforces this in code: an entry whose licence is not Apache-2.0 or MIT
+raises `ConfigError` at load time. It cannot drift silently.
+
 | Model | Licence | Verified | Notes |
 |---|---|---|---|
-| [Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base) | Apache-2.0 | 2026-07-28 | 0.6B params, 32K context |
-| [Qwen3-1.7B-Base](https://huggingface.co/Qwen/Qwen3-1.7B-Base) | Apache-2.0 | 2026-07-28 | 1.7B params, 32K context |
+| [mlx-community/Qwen3-4B-Instruct-2507-4bit](https://huggingface.co/mlx-community/Qwen3-4B-Instruct-2507-4bit) | Apache-2.0 | 2026-07-29 | **In the registry — default chat model.** 2.1 GB on disk, native tool calling. |
+| [mlx-community/Qwen3-8B-4bit](https://huggingface.co/mlx-community/Qwen3-8B-4bit) | Apache-2.0 | 2026-07-29 | **In the registry.** 4.6 GB, adds thinking mode. |
+| [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | Apache-2.0 | 2026-07-29 | Upstream of the 4-bit conversion above. 262K native context. |
+| [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) | Apache-2.0 | 2026-07-29 | Upstream of the 8B conversion. 32K native, 131K with YaRN. |
+| [Qwen3-0.6B-Base](https://huggingface.co/Qwen/Qwen3-0.6B-Base) | Apache-2.0 | 2026-07-28 | Track B candidate, not in the registry. |
+| [Qwen3-1.7B-Base](https://huggingface.co/Qwen/Qwen3-1.7B-Base) | Apache-2.0 | 2026-07-28 | Track B candidate, not in the registry. |
 
 Not used, and why: **Llama** (Meta community licence — not Apache or MIT, carries conditions),
 anything tagged research-only or non-commercial.
