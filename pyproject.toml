@@ -73,6 +73,7 @@ module = [
     "mlx.*", "mlx_lm.*", "llama_cpp.*", "huggingface_hub.*",
     "sqlite_vec.*", "onnxruntime.*", "tokenizers.*",
     "Quartz.*", "AppKit.*", "objc.*", "ApplicationServices.*",
+    "Vision.*", "Foundation.*",
 ]
 ignore_missing_imports = true
 

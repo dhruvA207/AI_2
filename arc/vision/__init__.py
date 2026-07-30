@@ -6,6 +6,32 @@ genuine visual understanding. Capture always downscales before anything reaches 
 model — a Retina screenshot costs ~6,000 tokens untouched.
 """
 
+from arc.vision.accessibility import (
+    Element,
+    actionable_elements,
+    find,
+    frontmost_application,
+    is_trusted,
+    read_tree,
+    summarize,
+)
 from arc.vision.capture import Screenshot, capture, capture_dir, displays
+from arc.vision.ocr import TextRegion, find_text, read_image, read_text
 
-__all__ = ["Screenshot", "capture", "capture_dir", "displays"]
+__all__ = [
+    "Element",
+    "Screenshot",
+    "TextRegion",
+    "actionable_elements",
+    "capture",
+    "capture_dir",
+    "displays",
+    "find",
+    "find_text",
+    "frontmost_application",
+    "is_trusted",
+    "read_image",
+    "read_text",
+    "read_tree",
+    "summarize",
+]
