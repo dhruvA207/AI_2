@@ -499,3 +499,31 @@ from 11.5 GB to 8.0 GB. Before the fix it changed nothing.
 **Consequence.** The sizing helpers fall back to the historical defaults when config
 cannot be loaded, because the hardware probe runs on a fresh install before anything is
 configured.
+
+---
+
+## ADR-023 — Track B shelved
+
+**Decision.** Track B — training or fine-tuning a model of my own — is not being
+pursued. No training code exists and none will be written for now.
+
+**Why.** ARC runs on Qwen3, which is Apache-2.0. §0.1's requirement was that every
+dependency be permissively licensed and that the application code be entirely mine, and
+that is already true: the weights impose no royalty, no usage cap, and no commercial
+restriction, and everything around them was written for this project. Track B was never
+what made ARC *owned* — it was about learning ML, and it is being dropped on those
+grounds rather than on licensing ones.
+
+It was also always gated on Track A generating tool-call traces to train on, which put
+it months out regardless.
+
+**What is kept.** `docs/BRIEF.md` §6 (collapsed and marked shelved),
+`docs/ML_CURRICULUM.md` stages 0-2, and `config/training.yaml`. They cost nothing to
+keep and record how the scope moved: from an 8xH100 rented cluster, to 2xH100 for 30
+hours, to a fine-tune of an open base, to a Windows training appliance, to nothing.
+That trail is worth more than a tidy tree if the question is ever reopened.
+
+**Consequence.** ARC is now a single-track project. `arc/model/custom.py` — the socket
+Track B would have plugged into — is not built, but the `LanguageModel` interface it
+would satisfy remains deliberately narrow (ADR-011), so reviving it later costs nothing
+extra.

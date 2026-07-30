@@ -406,7 +406,24 @@ What is actually left:
 lives, and it is the reason the core imports cleanly without any Apple framework
 present.
 
-## 6. TRACK B — MY OWN MODEL
+## 6. TRACK B — MY OWN MODEL (SHELVED)
+
+> **Shelved 2026-07-30.** I am not pursuing Track B. ARC works on an Apache-2.0
+> open-weight model and that is enough — §0.1's ownership goal was always about
+> licensing, and a permissively-licensed model already satisfies it completely. Nothing
+> below was built; there is no training code in this repository.
+>
+> The section is kept rather than deleted because it records how the scope moved and
+> why, which is worth more than a clean file. See `docs/DECISIONS.md` ADR-023.
+>
+> If it is ever revived, `config/training.yaml` and `docs/ML_CURRICULUM.md` (stages 0-2)
+> are the starting points, and the constraint that mattered still holds: use a
+> pretrained base, and no run longer than about a week.
+
+<details>
+<summary>The plan as it stood when shelved</summary>
+
+
 
 > **Revised 2026-07-28.** This section originally planned a from-scratch model pretrained on a
 > rented 8×H100 node for 24 hours, with compute-credit tracking and spot-instance handling. I
@@ -552,6 +569,10 @@ which makes every derived run-time figure fiction. **The first Track B task is a
 a window long enough to throttle. No predicted training times go into any doc before then, and
 `config/training.yaml` keeps its dimensions `null` until they come from a measurement rather
 than a guess.
+
+---
+
+</details>
 
 ---
 
