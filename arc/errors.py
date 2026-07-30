@@ -41,6 +41,15 @@ class HardwareProbeError(ArcError):
     """The hardware probe could not determine something downstream code depends on."""
 
 
+class ControlError(ArcError):
+    """ARC does not have input control, or it was taken back mid-task.
+
+    Raised before every synthetic mouse or keyboard event rather than only at the
+    start, so the user reclaiming the pointer stops the *next* event rather than
+    being noticed some time later.
+    """
+
+
 class WebError(ArcError):
     """A page could not be fetched, or was refused.
 

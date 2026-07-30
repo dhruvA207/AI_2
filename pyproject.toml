@@ -54,6 +54,9 @@ ignore = ["ANN401"]  # Any is legitimate in the config/JSON boundary layers.
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]  # Test functions do not need return annotations to be readable.
+# Cocoa selectors are camelCase by mandate — drawRect_ and isOpaque are the names
+# AppKit calls, and renaming them means they are simply never invoked.
+"arc/control/overlay.py" = ["N802"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -69,6 +72,7 @@ disallow_untyped_defs = true
 module = [
     "mlx.*", "mlx_lm.*", "llama_cpp.*", "huggingface_hub.*",
     "sqlite_vec.*", "onnxruntime.*", "tokenizers.*",
+    "Quartz.*", "AppKit.*", "objc.*", "ApplicationServices.*",
 ]
 ignore_missing_imports = true
 

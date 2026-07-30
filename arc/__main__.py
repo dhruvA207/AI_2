@@ -16,6 +16,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -172,6 +173,59 @@ def _check_optional_deps() -> list[Check]:
     return checks
 
 
+def _check_permissions() -> list[Check]:
+    """Report the macOS grants Phase 6 needs.
+
+    These cannot be granted programmatically and fail *silently* when missing —
+    screen capture returns a black image, synthetic clicks land nowhere. Surfacing
+    them here turns a baffling non-event into one line telling you what to click.
+    """
+    if platform_name() != "macos":
+        return []
+
+    checks: list[Check] = []
+
+    try:
+        import Quartz
+
+        allowed = bool(Quartz.CGPreflightScreenCaptureAccess())
+        checks.append(
+            Check(
+                "screen recording",
+                "ok" if allowed else "warn",
+                "granted"
+                if allowed
+                else "NOT granted — System Settings > Privacy & Security > "
+                "Screen Recording, then restart the terminal",
+            )
+        )
+    except Exception:
+        checks.append(Check("screen recording", "warn", "could not determine"))
+
+    try:
+        # ctypes rather than pyobjc-framework-ApplicationServices: the whole check is
+        # one boolean, and it is not worth another dependency to read it.
+        import ctypes
+        import ctypes.util
+
+        path = ctypes.util.find_library("ApplicationServices")
+        trusted = bool(ctypes.cdll.LoadLibrary(path).AXIsProcessTrusted()) if path else False
+        checks.append(
+            Check(
+                "accessibility",
+                "ok" if trusted else "warn",
+                "granted (mouse and keyboard control available)"
+                if trusted
+                else "NOT granted — System Settings > Privacy & Security > "
+                "Accessibility. Without it, synthetic clicks silently do nothing",
+            )
+        )
+    except Exception:
+        checks.append(Check("accessibility", "warn", "could not determine"))
+
+    return checks
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Report the environment, per brief §5."""
     platform = get_platform()
@@ -191,6 +245,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     except ArcError as exc:
         checks.append(Check("hardware", "fail", str(exc)))
     checks += _check_optional_deps()
+    checks += _check_permissions()
 
     if not args.json:
         print(f"\nARC doctor — {platform_name()}\n")
@@ -422,6 +477,55 @@ def cmd_memory(args: argparse.Namespace) -> int:
         raise ConfigError(f"unknown memory subcommand {args.memory_command!r}")
     finally:
         memory.close()
+
+
+def cmd_control(args: argparse.Namespace) -> int:
+    """Inspect or end ARC's control of the mouse and keyboard."""
+    from arc.control import session as control_session
+
+    if args.control_command == "status":
+        session = control_session.current()
+        state = session.state.to_dict() if session else {"active": False}
+        if args.json:
+            print(json.dumps(state, indent=2))
+        elif state["active"]:
+            print(f"ARC has control ({state['reason']}), held {state['held_seconds']}s")
+        else:
+            print("ARC does not have control")
+        return 0
+
+    if args.control_command == "release":
+        # Also clears any orphaned indicator, so a crashed session cannot leave the
+        # glow on screen with nothing behind it.
+        control_session.stop("arc control release")
+        subprocess.run(
+            ["/usr/bin/pkill", "-f", "arc.control.overlay"], capture_output=True, check=False
+        )
+        print("control released")
+        return 0
+
+    if args.control_command == "demo":
+        import time
+
+        print("showing the control indicator for 5 seconds...", file=sys.stderr)
+        session = control_session.start(
+            reason="indicator demo", audit=_audit_logger(config_or_none(args))
+        )
+        try:
+            time.sleep(5)
+        finally:
+            control_session.stop("demo ended")
+        print("done")
+        return 0
+
+    raise ConfigError(f"unknown control subcommand {args.control_command!r}")
+
+
+def config_or_none(args: argparse.Namespace) -> Config | None:
+    """Load config, tolerating absence — used where config is a nicety, not a need."""
+    with contextlib.suppress(ArcError):
+        return Config.load(directory=args.config_dir)
+    return None
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
@@ -732,6 +836,13 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         help="report what would change without changing it",
     )
+
+    control = sub.add_parser("control", help="inspect or end ARC's input control")
+    control.set_defaults(func=cmd_control)
+    control_sub = control.add_subparsers(dest="control_command", required=True)
+    control_sub.add_parser("status", help="is ARC controlling the mouse and keyboard?")
+    control_sub.add_parser("release", help="take control back immediately")
+    control_sub.add_parser("demo", help="show the control indicator for five seconds")
 
     tools = sub.add_parser("tools", help="list the tools available to the agent")
     tools.set_defaults(func=cmd_tools)
