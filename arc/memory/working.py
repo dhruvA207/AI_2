@@ -134,23 +134,33 @@ class WorkingMemory:
     def render_memories(self, hits: list[Hit]) -> str:
         """Format retrieved memories for the prompt.
 
-        Sources and dates are included because §4.4 requires ARC to cite where a fact
-        came from when asked, and it cannot cite what it was never shown.
+        Provenance used to be appended inline as ``- fact [episodic, 2026-07-30]``.
+        Small models copy that: asked to reply "pong", the model answered
+        "pong [episodic, 2026-07-30]", and because the reply was then stored and
+        recalled, the next turn produced two markers. Telling it not to did not help —
+        a format that looks like content gets imitated regardless.
+
+        So facts are plain prose now, and provenance appears only where it earns its
+        place: a source URL, which §4.4 requires for citation, and a low-confidence
+        note, which changes how the fact should be used. Both are phrased as sentences
+        rather than bracketed tags.
         """
         if not hits:
             return ""
 
-        lines = ["## Relevant memories", ""]
+        lines = [
+            "Things you already know (use them naturally; this list is context, "
+            "not a format to copy):",
+            "",
+        ]
         for hit in hits:
             record = hit.record
-            stamp = record.occurred_at[:10]
-            marker = f"[{record.layer}, {stamp}"
+            line = f"- {record.content.rstrip('.')}."
             if record.source_url:
-                marker += f", source: {record.source_url}"
-            if record.confidence < 0.9:
-                marker += f", confidence {record.confidence:.0%}"
-            marker += "]"
-            lines.append(f"- {record.content} {marker}")
+                line += f" Source: {record.source_url}"
+            if record.confidence < 0.7:
+                line += " (uncertain)"
+            lines.append(line)
         return "\n".join(lines)
 
     def render_procedures(self, records: list[MemoryRecord]) -> str:

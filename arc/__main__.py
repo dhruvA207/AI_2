@@ -28,8 +28,11 @@ from arc.audit import AuditLogger, KillSwitch
 from arc.config import Config
 from arc.errors import ArcError, ConfigError
 from arc.hardware import ModelSizing, refresh
+from arc.log import get_logger
 from arc.paths import arc_home, audit_dir, config_dir, ensure_runtime_dirs, log_dir, run_dir
 from arc.platform import HardwareInfo, get_platform, platform_name
+
+_log_cli = get_logger(__name__)
 
 Status = Literal["ok", "warn", "fail"]
 
@@ -479,6 +482,17 @@ def cmd_memory(args: argparse.Namespace) -> int:
         memory.close()
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the local API server, holding the model and memory warm."""
+    from arc.interface import server
+
+    config = _require_config(args)
+    from arc.tools import web as web_tools
+
+    web_tools.configure(config)
+    return server.serve(config, port=args.port, preload=not args.lazy)
+
+
 def cmd_control(args: argparse.Namespace) -> int:
     """Inspect or end ARC's control of the mouse and keyboard."""
     from arc.control import session as control_session
@@ -554,6 +568,37 @@ def cmd_tools(args: argparse.Namespace) -> int:
     return 0
 
 
+def _try_server(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Send a request to a running server, or return None if there is not one.
+
+    Falls back silently rather than failing: a warm server is an optimisation, and a
+    command that stops working because the daemon died would be worse than one that is
+    two seconds slower.
+    """
+    from arc.interface import server
+
+    endpoint = server.running_endpoint()
+    if endpoint is None:
+        return None
+
+    import urllib.error
+    import urllib.request
+
+    host, port = endpoint
+    request = urllib.request.Request(
+        f"http://{host}:{port}{path}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=600) as handle:
+            result: dict[str, Any] = json.loads(handle.read())
+            return result
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        _log_cli.warning("warm server unreachable, running locally: %s", exc)
+        return None
+
+
 def cmd_do(args: argparse.Namespace) -> int:
     """Run a multi-step task with tools."""
     from arc.agent.loop import Agent, Step
@@ -569,6 +614,25 @@ def cmd_do(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         print("[dry-run] mutating tools will be skipped; read-only tools still run\n")
+
+    # A warm server already holds the model, saving the ~2s load measured in §7's
+    # profiling. Only used when one is actually running.
+    if not args.no_server:
+        served = _try_server(
+            "/do",
+            {"task": args.task, "max_steps": args.max_steps, "dry_run": args.dry_run},
+        )
+        if served is not None and "answer" in served:
+            if args.json:
+                print(json.dumps(served, indent=2))
+            else:
+                for step in served.get("steps", []):
+                    observation = step.get("observation") or {}
+                    status = "ok" if observation.get("ok") else "failed"
+                    print(f"  [{step['number']}] {step['tool']} -> {status}", file=sys.stderr)
+                print(f"\n{served['answer']}\n")
+                print("— via warm server", file=sys.stderr)
+            return 0
 
     print(f"loading {entry.key}...", file=sys.stderr)
     model = router.load_model(config, "chat")
@@ -837,6 +901,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="report what would change without changing it",
     )
 
+    serve = sub.add_parser("serve", help="run the local API server, keeping the model warm")
+    serve.add_argument("--port", type=int, default=8787)
+    serve.add_argument(
+        "--lazy", action="store_true", help="load the model on first request, not at startup"
+    )
+    serve.set_defaults(func=cmd_serve)
+
     control = sub.add_parser("control", help="inspect or end ARC's input control")
     control.set_defaults(func=cmd_control)
     control_sub = control.add_subparsers(dest="control_command", required=True)
@@ -857,6 +928,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="give up after this many tool calls (default: 12)",
     )
     do.add_argument("--no-memory", action="store_true", help="run without long-term memory")
+    do.add_argument(
+        "--no-server",
+        action="store_true",
+        help="load the model in-process instead of using a running `arc serve`",
+    )
     do.set_defaults(func=cmd_do)
 
     research = sub.add_parser("research", help="research a question on the web")
