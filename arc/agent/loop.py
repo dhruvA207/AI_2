@@ -116,6 +116,8 @@ class Agent:
         max_steps: int = DEFAULT_MAX_STEPS,
         dry_run: bool = False,
         on_step: Callable[[Step], None] | None = None,
+        journal: Any = None,
+        resume_from: Any = None,
     ) -> None:
         self._model = model
         self._registry = registry
@@ -126,6 +128,10 @@ class Agent:
         #: Called after each step, so a CLI can show progress rather than appearing
         #: to hang for thirty seconds.
         self._on_step = on_step
+        #: Records progress to disk so a crash mid-task is recoverable (§7).
+        self._journal = journal
+        #: A prior interrupted run whose steps are replayed into the prompt.
+        self._resume_from = resume_from
 
     @property
     def native_tools(self) -> bool:
@@ -148,6 +154,11 @@ class Agent:
 
                 working = WorkingMemory.for_model(self._model)
                 sections.append(working.render_memories(working.pack_memories(hits)))
+
+        if self._resume_from is not None:
+            # Replayed rather than re-executed: silently re-running a task that was
+            # halfway through deleting things is what a recovery mechanism must not do.
+            sections.append(self._resume_from.summarize_for_model())
 
         if not self.native_tools:
             sections.append(_REACT_INSTRUCTIONS + self._registry.render_prompt())
@@ -180,6 +191,8 @@ class Agent:
                 # No tool call: the model is answering. That is the normal exit.
                 answer = completion.text.strip()
                 self._finish(task, answer, steps)
+                if self._journal is not None:
+                    self._journal.finish(answer)
                 return AgentResult(answer=answer, steps=steps)
 
             thought = strip_tool_call(completion.text) if not self.native_tools else completion.text
@@ -193,6 +206,8 @@ class Agent:
 
             step.observation = self._executor.execute(call.name, call.arguments)
             steps.append(step)
+            if self._journal is not None:
+                self._journal.step(number, call.name, call.arguments, step.observation)
             if self._on_step is not None:
                 self._on_step(step)
 
@@ -216,6 +231,8 @@ class Agent:
         )
         final = self._model.generate(messages, max_tokens=1024).text.strip()
         self._finish(task, final, steps, exhausted=True)
+        if self._journal is not None:
+            self._journal.finish(final, status="exhausted")
         return AgentResult(answer=final, steps=steps, exhausted=True)
 
     def _extract(

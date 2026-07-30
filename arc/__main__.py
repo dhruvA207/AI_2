@@ -482,6 +482,49 @@ def cmd_memory(args: argparse.Namespace) -> int:
         memory.close()
 
 
+def cmd_task(args: argparse.Namespace) -> int:
+    """List, inspect, and resume journalled tasks."""
+    from arc.agent import journal
+
+    if args.task_command == "list":
+        records = journal.recent(args.limit)
+        if args.json:
+            print(json.dumps([r.to_dict() for r in records], indent=2))
+            return 0
+        if not records:
+            print("no tasks recorded yet")
+            return 0
+        for record in records:
+            marker = "!" if record.status == "interrupted" else " "
+            print(
+                f"{marker} {record.id}  {record.status:12} "
+                f"{len(record.steps):2d} steps  {record.task[:48]}"
+            )
+        if any(r.status == "interrupted" for r in records):
+            print("\n! = interrupted; resume with `arc task resume <id>`")
+        return 0
+
+    if args.task_command == "show":
+        record = journal.load(args.id)
+        if args.json:
+            print(json.dumps(record.to_dict(), indent=2))
+            return 0
+        print(f"\n{record.id}: {record.task}\nstatus: {record.status}\n")
+        print(record.summarize_for_model())
+        if record.answer:
+            print(f"\nanswer: {record.answer[:600]}")
+        return 0
+
+    if args.task_command == "resume":
+        record = journal.load(args.id)
+        if record.status not in ("interrupted", "failed"):
+            print(f"task {args.id} is {record.status}; nothing to resume", file=sys.stderr)
+            return 1
+        return _run_task(args, task=record.task, resume_from=record, resuming=args.id)
+
+    raise ConfigError(f"unknown task subcommand {args.task_command!r}")
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     """Run the local API server, holding the model and memory warm."""
     from arc.interface import server
@@ -601,17 +644,6 @@ def _try_server(path: str, payload: dict[str, Any]) -> dict[str, Any] | None:
 
 def cmd_do(args: argparse.Namespace) -> int:
     """Run a multi-step task with tools."""
-    from arc.agent.loop import Agent, Step
-    from arc.model import router
-    from arc.model.registry import resolve
-    from arc.tools import registry as tool_registry
-    from arc.tools import web as web_tools
-
-    config = _require_config(args)
-    entry = resolve(config, "chat")
-    audit = _audit_logger(config)
-    web_tools.configure(config)
-
     if args.dry_run:
         print("[dry-run] mutating tools will be skipped; read-only tools still run\n")
 
@@ -634,7 +666,28 @@ def cmd_do(args: argparse.Namespace) -> int:
                 print("— via warm server", file=sys.stderr)
             return 0
 
-    print(f"loading {entry.key}...", file=sys.stderr)
+    return _run_task(args, task=args.task)
+
+
+def _run_task(
+    args: argparse.Namespace,
+    *,
+    task: str,
+    resume_from: Any = None,
+    resuming: str | None = None,
+) -> int:
+    """Run or resume an agent task."""
+    from arc.agent.journal import Journal
+    from arc.agent.loop import Agent, Step
+    from arc.model import router
+    from arc.tools import registry as tool_registry
+    from arc.tools import web as web_tools
+
+    config = _require_config(args)
+    audit = _audit_logger(config)
+    web_tools.configure(config)
+
+    print("loading model...", file=sys.stderr)
     model = router.load_model(config, "chat")
 
     memory = None
@@ -651,18 +704,34 @@ def cmd_do(args: argparse.Namespace) -> int:
             # output, which is worth knowing before blaming the agent.
             print(f"      (parser repaired: {', '.join(step.repairs)})", file=sys.stderr)
 
+    record = Journal(task)
+    print(f"task {record.id}", file=sys.stderr)
+
+    if resuming:
+        # Close out the original so it stops appearing as unfinished work.
+        from arc.agent.journal import mark_resumed
+
+        mark_resumed(resuming, record.id)
+
     agent = Agent(
         model,
         tool_registry,
         memory=memory,
         audit=audit,
         max_steps=args.max_steps,
-        dry_run=args.dry_run,
+        dry_run=getattr(args, "dry_run", False),
         on_step=None if args.json else show,
+        journal=record,
+        resume_from=resume_from,
     )
 
     try:
-        result = agent.run(args.task)
+        result = agent.run(task)
+    except BaseException as exc:
+        # Including KeyboardInterrupt: an interrupted task is exactly the one worth
+        # being able to resume.
+        record.fail(f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         if memory is not None:
             memory.close()
@@ -900,6 +969,19 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="dry_run",
         help="report what would change without changing it",
     )
+
+    task = sub.add_parser("task", help="list, inspect, and resume journalled tasks")
+    task.set_defaults(func=cmd_task)
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+    listing = task_sub.add_parser("list", help="recent tasks, marking interrupted ones")
+    listing.add_argument("--limit", type=int, default=20)
+    show = task_sub.add_parser("show", help="what a task did, step by step")
+    show.add_argument("id")
+    resume = task_sub.add_parser("resume", help="continue an interrupted task")
+    resume.add_argument("id")
+    resume.add_argument("--max-steps", type=int, default=12, dest="max_steps")
+    resume.add_argument("--no-memory", action="store_true")
+    resume.add_argument("--no-server", action="store_true")
 
     serve = sub.add_parser("serve", help="run the local API server, keeping the model warm")
     serve.add_argument("--port", type=int, default=8787)

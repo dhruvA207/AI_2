@@ -7,6 +7,7 @@ carry a model trained from scratch.
 """
 
 from arc.agent.executor import Executor, Observation
+from arc.agent.journal import Journal, TaskRecord
 from arc.agent.loop import Agent, AgentResult, Step
 from arc.agent.parser import ParsedCall, parse_tool_call
 
@@ -14,8 +15,10 @@ __all__ = [
     "Agent",
     "AgentResult",
     "Executor",
+    "Journal",
     "Observation",
     "ParsedCall",
     "Step",
+    "TaskRecord",
     "parse_tool_call",
 ]
