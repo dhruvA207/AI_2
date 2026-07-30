@@ -509,6 +509,52 @@ def cmd_do(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_deep(
+    args: argparse.Namespace, config: Config, model: Any, memory: Any, web_tools: Any
+) -> int:
+    """Run the multi-round corroborating researcher."""
+    from arc.web.deep import DeepResearcher
+
+    settings = config.section("web.research.deep")
+    researcher = DeepResearcher(
+        model,
+        memory,
+        fetcher=web_tools._client(),
+        backends=list(config.get("web.search.backends") or []) or None,
+        rounds=args.rounds or int(settings.get("rounds", 2)),
+        queries_per_round=int(settings.get("queries_per_round", 3)),
+        pages_per_round=int(settings.get("pages_per_round", 4)),
+    )
+    print("Research Mode: multi-query, multi-source, corroborated.", file=sys.stderr)
+
+    try:
+        result = researcher.research(
+            args.query,
+            on_progress=None if args.json else lambda m: print(f"  {m}", file=sys.stderr),
+            store=not args.no_memory,
+        )
+    finally:
+        if memory is not None:
+            memory.close()
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0
+
+    print(f"\n{result.answer}\n")
+    print(
+        f"— {result.rounds} round(s), {len(result.queries)} queries, "
+        f"{result.pages_read} pages, {len(result.findings)} findings "
+        f"({len(result.corroborated)} corroborated)",
+        file=sys.stderr,
+    )
+    for source in result.sources[:10]:
+        print(f"  {source}", file=sys.stderr)
+    if result.memory_ids:
+        print(f"  stored {len(result.memory_ids)} findings", file=sys.stderr)
+    return 0
+
+
 def cmd_research(args: argparse.Namespace) -> int:
     """Research a question on the web and remember what was learned."""
     from arc.model import router
@@ -526,6 +572,12 @@ def cmd_research(args: argparse.Namespace) -> int:
 
     print("loading model...", file=sys.stderr)
     model = router.load_model(config, "chat")
+
+    # Shallow by default; Research Mode is opt-in via --deep or config.
+    deep = args.deep or str(config.get("web.research.mode", "shallow")).lower() == "deep"
+    if deep:
+        return _run_deep(args, config, model, memory, web_tools)
+
     researcher = Researcher(
         model,
         memory,
@@ -707,6 +759,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ignore stored answers and go to the network",
     )
     research.add_argument("--no-memory", action="store_true", help="do not store what is learned")
+    research.add_argument(
+        "--deep",
+        action="store_true",
+        help="multi-query, multi-round research with cross-source corroboration",
+    )
+    research.add_argument(
+        "--rounds", type=int, default=0, help="research rounds when --deep (0 = use config)"
+    )
     research.set_defaults(func=cmd_research)
 
     chat = sub.add_parser("chat", help="talk to the local model")

@@ -403,13 +403,20 @@ def test_bing_results_come_from_organic_containers_only() -> None:
     ("query", "expected"),
     [
         ("what is the capital of Mongolia", "capital Mongolia"),
-        ("how do I fix a segfault in C using malloc", "C using malloc"),
         ("rust borrow checker", "rust borrow checker"),
+        ("Rust borrow checker definition and purpose", "Rust borrow checker"),
     ],
 )
-def test_condense_strips_stopwords_and_keeps_the_tail(query: str, expected: str) -> None:
-    """Questions front-load context and end on the specific thing being asked about."""
+def test_condense_keeps_the_distinctive_terms(query: str, expected: str) -> None:
+    """Regression: truncating to the last N words dropped the subject. "Rust borrow
+    checker definition and purpose" became "checker definition purpose", which returned
+    dictionary entries. Proper nouns and identifiers carry the search signal."""
     assert condense(query) == expected
+
+
+def test_condense_preserves_word_order() -> None:
+    """Reordering terms changes what a search engine matches on."""
+    assert condense("how do I fix a segfault in C using malloc").split()[0] == "fix"
 
 
 def test_condense_falls_back_when_everything_is_a_stopword() -> None:

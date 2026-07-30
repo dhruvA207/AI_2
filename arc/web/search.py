@@ -210,11 +210,16 @@ def condense(query: str, *, limit: int = KEYWORD_LIMIT) -> str:
     if not kept:
         kept = words
 
-    # Keep the *last* terms, not the first. Questions front-load context and end on the
-    # specific thing being asked about: "how do I fix a segfault in C using malloc"
-    # is about malloc and segfaults, not about fixing.
+    # Prefer capitalised and non-lowercase terms — proper nouns and identifiers carry
+    # the most search signal. Truncating blindly to the tail dropped "Rust" from
+    # "Rust borrow checker definition and purpose", leaving "checker definition
+    # purpose" and returning dictionary entries.
     if len(kept) > limit:
-        kept = kept[-limit:]
+        distinctive = [w for w in kept if not w.islower()]
+        rest = [w for w in kept if w.islower()]
+        ordered = distinctive + rest
+        chosen = set(ordered[:limit])
+        kept = [w for w in kept if w in chosen][:limit]
 
     return " ".join(kept)
 
@@ -406,12 +411,15 @@ def search(
     limit: int = 8,
     fetcher: Fetcher | None = None,
     backends: tuple[str, ...] | list[str] | None = None,
-    keywords: bool = True,
+    keywords: bool = False,
 ) -> list[SearchResult]:
     """Search the web, trying each configured backend until one returns results.
 
-    ``keywords`` condenses a natural-language question to search terms first, which is
-    what makes Bing usable — see ``condense``. Turn it off to send the query verbatim.
+    ``keywords`` condenses the query to search terms first — **off by default**. It was
+    built to rescue Bing and did not, and it actively harms good backends: condensing
+    "Rust borrow checker definition and purpose" to its last three content words gives
+    "checker definition purpose", which drops the subject and returns dictionary
+    entries. Opt in only where a backend is known to need it.
 
     Falls through on an empty result as well as on an error. A backend that returns
     nothing looks exactly like a query with no answers, so without fallthrough a broken

@@ -216,8 +216,23 @@ class _TreeBuilder(HTMLParser):
             self._current.children.append(data)
 
 
+#: Elements that are structurally incapable of being furniture. ``<html>`` and
+#: ``<body>`` contain the whole document by definition, and ``<main>``/``<article>``
+#: declare themselves the content.
+#:
+#: This guard is load-bearing, not defensive. mdBook — which renders the Rust Book,
+#: the rustc dev guide, and much of the Rust ecosystem's documentation — puts
+#: ``class="sidebar-visible"`` on the ``<html>`` element itself. Substring-matching
+#: "sidebar" against that flagged the entire document as boilerplate and pruned it to
+#: nothing, so ARC silently discarded the highest-quality sources it found while
+#: happily keeping blog posts.
+_NEVER_BOILERPLATE = frozenset({"html", "body", "main", "article", "root"})
+
+
 def _is_boilerplate(node: _Node) -> bool:
     """Whether a node looks like page furniture rather than content."""
+    if node.tag in _NEVER_BOILERPLATE:
+        return False
     if node.tag in _BOILERPLATE_TAGS:
         return True
     marker = node.marker()
