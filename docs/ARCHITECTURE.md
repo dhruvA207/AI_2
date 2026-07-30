@@ -1,6 +1,6 @@
 # Architecture
 
-**What exists today, at the end of Phase 2.** The aspirational full tree lives in
+**What exists today, at the end of Phase 7.** The aspirational full tree lives in
 `docs/BRIEF.md` §4; this file describes only what is built, so it can be trusted.
 
 ## Current state
@@ -23,8 +23,24 @@ arc/
 │   ├── manager.py   pull / status / use / remove
 │   ├── mlx_backend.py   Apple Silicon fast path
 │   └── llamacpp.py      portable GGUF (CPU/Metal/CUDA)
+├── agent/           ── THE LOOP ──
+│   ├── loop.py      perceive → plan → act → observe → store
+│   ├── executor.py  tool dispatch; errors become observations
+│   ├── parser.py    tolerant ReAct parsing (§4.1)
+│   └── journal.py   crash recovery and resumable tasks
+├── memory/          ── THE MEMORY CACHE ──
+│   ├── store.py     SQLite + sqlite-vec, one portable file
+│   ├── episodic.py semantic.py procedural.py
+│   ├── retrieval.py hybrid: vector + BM25 + graph + recency
+│   ├── working.py   context-window budget
+│   └── consolidation.py
+├── tools/           32 tools: filesystem, shell, code, web, screen, input
+├── web/             fetch, extract, search, research, deep research
+├── vision/          capture, accessibility tree, OCR
+├── control/         mouse/keyboard with a visible indicator
 ├── interface/
-│   └── chat.py      streaming REPL
+│   ├── chat.py      streaming REPL
+│   └── server.py    local API, keeps the model warm
 └── platform/
     ├── base.py      Platform ABC + HardwareInfo
     ├── macos.py     implemented
@@ -32,11 +48,28 @@ arc/
     └── linux.py     stub
 
 config/    default.yaml, models.yaml, policy.yaml, training.yaml
-tests/     201 tests
+tests/     587 tests
 ```
 
-Not built yet: `memory/` (Phase 3), `tools/` and `agent/` (Phase 4), `vision/` (Phase 6),
-`interface/server.py` (Phase 7), `training/` (Track B).
+Not built yet: a real `platform/windows.py` (Phase 8), and `training/` (Track B).
+
+## Measured costs
+
+Profiled in Phase 7 rather than guessed at. Everything is fast except two things:
+
+| Operation | Cost |
+|---|---|
+| CLI startup | 0.05–0.11s |
+| config load | 0.015s |
+| memory recall | 0.007s |
+| embed batch of 32 | 0.024s |
+| accessibility tree | 0.110s |
+| screen capture | 0.184s |
+| **OCR** | **0.72s** |
+| **model load** | **1.98s** |
+
+Model load is why `arc serve` exists: it holds the model resident, and the CLI uses it
+when running. Measured 11.5s cold versus 8.7s warm for the same task.
 
 ## The two load-bearing abstractions
 
