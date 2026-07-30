@@ -11,14 +11,18 @@ stack (requests + trafilatura) found GPL and MPL packages pulled in transitively
 standard library. See docs/DECISIONS.md ADR-017.
 """
 
+from arc.web.deep import DeepResearcher, DeepResult, Finding
 from arc.web.extract import Document, chunk, extract
 from arc.web.fetch import Fetcher, RateLimiter, Response, RobotsCache
 from arc.web.research import Researcher, ResearchResult
 from arc.web.search import SearchResult, search
 
 __all__ = [
+    "DeepResearcher",
+    "DeepResult",
     "Document",
     "Fetcher",
+    "Finding",
     "RateLimiter",
     "ResearchResult",
     "Researcher",
