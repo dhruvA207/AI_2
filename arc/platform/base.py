@@ -24,6 +24,24 @@ from typing import Any
 HARDWARE_SCHEMA_VERSION = 2
 
 
+def _reserve_settings() -> tuple[float, float]:
+    """Return (floor GB, fraction) reserved for the OS, from config.
+
+    Defaults match the historical constants so sizing still works before config exists
+    — the probe runs on a fresh install where nothing is set up yet.
+    """
+    try:
+        from arc.config import Config
+
+        section = Config.load().section("hardware")
+        return (
+            float(section.get("os_reserve_gb", 4.0)),
+            float(section.get("os_reserve_fraction", 0.28)),
+        )
+    except Exception:
+        return (4.0, 0.28)
+
+
 @dataclass(frozen=True, slots=True)
 class HardwareInfo:
     """A snapshot of the machine ARC is running on.
@@ -86,7 +104,10 @@ class HardwareInfo:
         """
         if self.unified_memory:
             # macOS itself plus a browser and an editor comfortably occupy ~5 GB.
-            reserve = max(4.0, self.ram_total_gb * 0.28)
+            # Read from config: these were declared there and ignored, so tuning them
+            # silently did nothing.
+            floor, fraction = _reserve_settings()
+            reserve = max(floor, self.ram_total_gb * fraction)
             return max(0.0, self.ram_total_gb - reserve)
         if self.vram_gb:
             return self.vram_gb

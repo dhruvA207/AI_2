@@ -212,6 +212,7 @@ class DeepResearcher:
         queries_per_round: int = 3,
         pages_per_round: int = 4,
         rounds: int = 2,
+        corroboration_threshold: float = CORROBORATION_THRESHOLD,
     ) -> None:
         self._model = model
         self._memory = memory
@@ -220,6 +221,7 @@ class DeepResearcher:
         self._queries_per_round = queries_per_round
         self._pages_per_round = pages_per_round
         self._rounds = rounds
+        self._threshold = corroboration_threshold
 
     # ── Planning ────────────────────────────────────────────────────────────────
 
@@ -362,7 +364,7 @@ class DeepResearcher:
                 _log.warning("could not embed claims, falling back to text match: %s", exc)
 
         for (claim, source), vector in zip(claims, vectors, strict=False):
-            match = self._nearest(findings, claim, vector)
+            match = self._nearest(findings, claim, vector, self._threshold)
             if match is not None:
                 if source not in match.sources:
                     match.sources.append(source)
@@ -375,7 +377,12 @@ class DeepResearcher:
         return findings
 
     @staticmethod
-    def _nearest(findings: list[Finding], claim: str, vector: list[float] | None) -> Finding | None:
+    def _nearest(
+        findings: list[Finding],
+        claim: str,
+        vector: list[float] | None,
+        threshold: float = CORROBORATION_THRESHOLD,
+    ) -> Finding | None:
         """Return an existing finding asserting the same thing, if any."""
         normalized = claim.lower().strip(" .")
 
@@ -386,7 +393,7 @@ class DeepResearcher:
             return None
 
         best: Finding | None = None
-        best_score = CORROBORATION_THRESHOLD
+        best_score = threshold
         for finding in findings:
             if finding.embedding is None:
                 continue

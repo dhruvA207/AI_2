@@ -41,6 +41,10 @@ class MemoryService:
     retriever: Retriever
     consolidator: Consolidator
     retrieval_limit: int = 6
+    #: Candidates each retrieval strategy contributes before fusion.
+    per_strategy: int = 20
+    #: Tokens held back for the model's reply when packing a prompt.
+    reserve_for_reply: int = 1024
 
     @classmethod
     def from_config(
@@ -93,6 +97,8 @@ class MemoryService:
                 audit=audit,
             ),
             retrieval_limit=int(retrieval_config.get("limit", 6)),
+            per_strategy=int(retrieval_config.get("per_strategy", 20)),
+            reserve_for_reply=int((section.get("working") or {}).get("reserve_for_reply", 1024)),
         )
 
     # ── Chat integration ────────────────────────────────────────────────────────
@@ -106,7 +112,11 @@ class MemoryService:
         assistant unusable whenever the database is busy.
         """
         try:
-            return self.retriever.search(query, limit=limit or self.retrieval_limit)
+            return self.retriever.search(
+                query,
+                limit=limit or self.retrieval_limit,
+                per_strategy=self.per_strategy,
+            )
         except Exception as exc:
             _log.warning("recall failed, continuing without memory: %s", exc)
             return []

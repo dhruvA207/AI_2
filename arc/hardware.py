@@ -76,6 +76,28 @@ def probe() -> HardwareInfo:
     return get_platform().probe_hardware()
 
 
+def _sizing_settings() -> dict[str, float]:
+    """Read the sizing knobs from config.
+
+    These were declared in ``config/default.yaml`` and then read from module constants
+    instead, so editing them did nothing at all — a silent no-op, which is worse than
+    not offering the setting. Falls back to the historical defaults when config cannot
+    be loaded, since sizing must still work before anything else is set up.
+    """
+    try:
+        from arc.config import Config
+
+        section = Config.load().section("hardware")
+    except Exception:
+        section = {}
+
+    return {
+        "vlm_gb": float(section.get("vlm_estimate_gb", _VLM_APPROX_GB)),
+        "embedder_gb": float(section.get("embedder_estimate_gb", _EMBEDDER_APPROX_GB)),
+        "min_headroom_gb": float(section.get("min_headroom_gb", 2.0)),
+    }
+
+
 def recommend_model(info: HardwareInfo) -> ModelSizing:
     """Pick a model size for this machine, with honest caveats.
 
@@ -101,17 +123,18 @@ def recommend_model(info: HardwareInfo) -> ModelSizing:
             f"~{usable:.1f} GB realistically available to a model."
         )
 
-    coreside_need = weights + _VLM_APPROX_GB + _EMBEDDER_APPROX_GB
+    settings = _sizing_settings()
+    coreside_need = weights + settings["vlm_gb"] + settings["embedder_gb"]
     can_coreside = coreside_need <= usable
     if not can_coreside:
         notes.append(
-            f"A vision model (~{_VLM_APPROX_GB:.0f} GB) and embedder "
-            f"(~{_EMBEDDER_APPROX_GB:.1f} GB) will not co-reside with a "
+            f"A vision model (~{settings['vlm_gb']:.0f} GB) and embedder "
+            f"(~{settings['embedder_gb']:.1f} GB) will not co-reside with a "
             f"{label} model here ({coreside_need:.1f} GB needed, {usable:.1f} GB available). "
             "Phase 2's router must load and evict the VLM around screen tasks."
         )
 
-    if headroom < 2.0:
+    if headroom < settings["min_headroom_gb"]:
         notes.append(
             f"Only {headroom:.1f} GB headroom after weights — KV cache growth on long "
             "contexts will be the binding constraint. Consider the next size down."

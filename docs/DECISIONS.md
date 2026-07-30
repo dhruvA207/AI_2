@@ -452,3 +452,50 @@ which is why it was not assumed. It is a small backend to add on request.
 **Not done, and not negotiable in this codebase:** making Bing or Google work would
 require impersonating a browser to defeat bot detection. Ignoring a robots.txt
 directive is the user's call; building evasion machinery is a different act.
+
+---
+
+## ADR-021 — ARC is a macOS application; Phase 8 re-scoped
+
+**Decision.** ARC targets this Mac only. Phase 8's "Windows readiness" — the CI matrix,
+a full `platform/windows.py`, the CUDA/vLLM backend — is cancelled. `windows.py` and
+`linux.py` stay as stubs.
+
+**Why.** ADR-007 already established that ARC runs on the Air and the Windows laptop is
+a Track B training appliance. Dhruv confirmed on 2026-07-30 that he is not changing
+machines at all. Building out a platform port for hardware that will never run it is
+speculative work with no payoff, and §8 says not to over-engineer early.
+
+**What stays, and why.** `arc/platform/` is not removed. It costs nothing now that it
+exists, it is where the OS-specific code already lives, and it is the reason
+`arc.config`, `arc.memory`, `arc.model`, `arc.agent`, and `arc.web` all import cleanly
+with every Apple framework blocked — verified, not assumed. The macOS-only surface is
+confined to `vision/`, `control/`, and `platform/macos.py`.
+
+**Consequence.** Screen capture, OCR, the accessibility tree, and input control are
+macOS-only by construction and say so when unavailable rather than failing quietly.
+
+---
+
+## ADR-022 — Config keys must be read, or they are lies
+
+**Decision.** Every key in `config/default.yaml` is now read by the code that claims to
+use it. Audited by cross-referencing the config tree against the source.
+
+**Why.** Twelve keys were declared and then ignored, with their values hardcoded as
+module constants — `hardware.os_reserve_gb`, `os_reserve_fraction`, `min_headroom_gb`,
+`vlm_estimate_gb`, `embedder_estimate_gb`, `memory.working.reserve_for_reply`,
+`memory.retrieval.per_strategy`, and `web.research.deep.corroboration_threshold` among
+them. Editing any of them did nothing at all.
+
+That is worse than not offering the setting. A missing key fails loudly the first time
+you look for it; a key that is read from nowhere fails silently forever, and the next
+person to tune memory sizing would have concluded the arithmetic was wrong rather than
+that the input was ignored.
+
+**Verified.** Setting `ARC_HARDWARE__OS_RESERVE_FRACTION=0.50` now moves usable memory
+from 11.5 GB to 8.0 GB. Before the fix it changed nothing.
+
+**Consequence.** The sizing helpers fall back to the historical defaults when config
+cannot be loaded, because the hardware probe runs on a fresh install before anything is
+configured.

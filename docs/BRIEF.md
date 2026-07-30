@@ -380,12 +380,31 @@ End-to-end tests of realistic multi-tool tasks. Performance profiling — find t
 will probably be embedding and screenshot encoding. Crash recovery and resumable tasks. Local
 HTTP/WebSocket server. Startup time and model warm-loading.
 
-### Phase 8 — Windows readiness
+### Phase 8 — Consolidation on this machine
 
-Full `platform/windows.py`. CI matrix running tests on macOS and Windows. CUDA/vLLM backend. A
-documented procedure for moving `~/.arc/` between machines.
+> **Revised 2026-07-30.** This was "Windows readiness". I am not moving ARC to another
+> machine — it runs on this Mac, and the Windows laptop is only a Track B training
+> appliance (`docs/DECISIONS.md` ADR-007). So the CI matrix, the full
+> `platform/windows.py`, and the CUDA/vLLM backend are all off the table, and the
+> platform abstraction stays as an architectural boundary rather than something to be
+> built out speculatively.
 
----
+What is actually left:
+
+- **Verify every command works here**, not in principle. Done: all 21 CLI commands run
+  clean on this machine.
+- **Config that actually takes effect.** Twelve keys in `config/default.yaml` were
+  declared and then never read, with the values hardcoded in the modules — so editing
+  them did nothing at all. Silent no-ops are worse than missing settings.
+- **Backup and restore of `~/.arc/`.** Still worth documenting, not for migration but
+  because it holds the memory database, and a machine can fail without being replaced.
+- **Honest failure on the parts that need macOS.** Screen capture, OCR, the
+  accessibility tree, and input control are macOS-only by construction. They must say
+  so rather than fail mysteriously.
+
+`arc/platform/` stays. It costs nothing, it is where the OS-specific code already
+lives, and it is the reason the core imports cleanly without any Apple framework
+present.
 
 ## 6. TRACK B — MY OWN MODEL
 
