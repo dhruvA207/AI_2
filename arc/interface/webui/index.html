@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARC</title>
+<link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+
+<canvas id="stage"></canvas>
+
+<!-- Rests muted. The binding is ⌘S; the label says so because a hotkey nobody
+     can see is a hotkey nobody uses. -->
+<div id="mute" class="mute" aria-live="polite">● MUTED <span class="key">⌘S</span></div>
+
+<div id="status" class="status" aria-live="polite"></div>
+
+<!-- Filled when a tool orb is clicked. Hidden until then: the default view is one
+     orb and nothing else. -->
+<aside id="inspector" class="inspector" hidden>
+  <header>
+    <span id="insp-cat" class="chip"></span>
+    <span id="insp-name" class="insp-name"></span>
+    <button id="insp-close" class="close" aria-label="Close">✕</button>
+  </header>
+  <div id="insp-state" class="insp-state"></div>
+  <section>
+    <h3>Arguments</h3>
+    <pre id="insp-args"></pre>
+  </section>
+  <section id="insp-result-wrap" hidden>
+    <h3>Result</h3>
+    <pre id="insp-result"></pre>
+  </section>
+</aside>
+
+<div id="transcript" class="transcript"></div>
+
+<script type="module" src="/ui/app.js"></script>
+</body>
+</html>

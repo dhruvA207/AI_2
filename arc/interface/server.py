@@ -24,6 +24,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -49,6 +50,20 @@ DEFAULT_SYSTEM = (
 
 #: Loopback only, and deliberately not configurable. See the module docstring.
 BIND_HOST = "127.0.0.1"
+
+#: The web UI ships inside the package so `arc serve` has something to serve without a
+#: build step or a node toolchain. Everything in here is hand-written ES modules.
+WEBUI_DIR = Path(__file__).parent / "webui"
+
+#: Deliberately a closed allow-list rather than mimetypes.guess_type. The directory
+#: only ever holds these four kinds of file, and an unknown extension should 404 rather
+#: than be served with a guessed type.
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".svg": "image/svg+xml",
+}
 
 
 #: Where the server records that it is running, so the CLI can find it.
@@ -129,6 +144,62 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_bytes(self, body: bytes, content_type: str, status: int = 200) -> None:
+        """Send a non-JSON body (the web UI's static files)."""
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _serve_static(self, path: str) -> None:
+        """Serve one file from ``WEBUI_DIR``.
+
+        ``resolve()`` then a containment check, rather than trusting the URL: a path
+        like ``/ui/../../../etc/passwd`` normalises away only after resolution, and the
+        server runs with ARC's own (unrestricted) privileges.
+        """
+        relative = path[len("/ui/") :] if path.startswith("/ui/") else "index.html"
+        if not relative:
+            relative = "index.html"
+
+        target = (WEBUI_DIR / relative).resolve()
+        root = WEBUI_DIR.resolve()
+        if root not in target.parents and target != root:
+            self._send({"error": "not found"}, 404)
+            return
+
+        content_type = _CONTENT_TYPES.get(target.suffix)
+        if content_type is None or not target.is_file():
+            self._send({"error": "not found"}, 404)
+            return
+
+        self._send_bytes(target.read_bytes(), content_type)
+
+    def _open_stream(self) -> None:
+        """Begin an SSE response.
+
+        ``ThreadingHTTPServer`` with ``daemon_threads`` handles each request on its own
+        thread, so holding this one open for the length of a generation does not block
+        anything else.
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+    def _event(self, event: str, payload: dict[str, Any]) -> None:
+        """Write one SSE frame and flush it.
+
+        Flushing matters: the whole point is that tokens appear as they are produced,
+        and a buffered stream that arrives all at once is indistinguishable from the
+        non-streaming endpoint.
+        """
+        body = f"event: {event}\ndata: {json.dumps(payload, default=str)}\n\n"
+        self.wfile.write(body.encode("utf-8"))
+        self.wfile.flush()
+
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
@@ -145,8 +216,10 @@ class _Handler(BaseHTTPRequestHandler):
         self.runtime.requests += 1
 
         try:
-            if route.path in ("/", "/health", "/status"):
+            if route.path in ("/health", "/status"):
                 self._send(self.runtime.status())
+            elif route.path == "/" or route.path.startswith("/ui/"):
+                self._serve_static(route.path)
             elif route.path == "/memory/search":
                 self._handle_memory_search(query)
             elif route.path == "/tools":
@@ -169,6 +242,8 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._body()
             if route.path == "/chat":
                 self._handle_chat(body)
+            elif route.path == "/chat/stream":
+                self._handle_chat_stream(body)
             elif route.path == "/do":
                 self._handle_task(body)
             elif route.path == "/memory/add":
@@ -183,14 +258,13 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ── Endpoints ───────────────────────────────────────────────────────────────
 
-    def _handle_chat(self, body: dict[str, Any]) -> None:
-        """One conversational turn, with memory recall and write-back."""
-        from arc.model.base import Message
+    def _compose(self, text: str, body: dict[str, Any]) -> tuple[list[Any], Any, str]:
+        """Build the prompt for one turn.
 
-        text = str(body.get("message", "")).strip()
-        if not text:
-            self._send({"error": "message is required"}, 400)
-            return
+        Shared by ``/chat`` and ``/chat/stream`` rather than duplicated: the memory
+        guidance below is load-bearing, and two copies would drift.
+        """
+        from arc.model.base import Message
 
         memory = self.runtime.memory
         session_id = str(body.get("session_id") or "http")
@@ -211,8 +285,17 @@ class _Handler(BaseHTTPRequestHandler):
                 sections.append(working.render_memories(working.pack_memories(hits)))
 
         messages.append(Message(role="system", content="\n\n".join(s for s in sections if s)))
-
         messages.append(Message(role="user", content=text))
+        return messages, memory, session_id
+
+    def _handle_chat(self, body: dict[str, Any]) -> None:
+        """One conversational turn, with memory recall and write-back."""
+        text = str(body.get("message", "")).strip()
+        if not text:
+            self._send({"error": "message is required"}, 400)
+            return
+
+        messages, memory, session_id = self._compose(text, body)
         completion = self.runtime.model.generate(
             messages,
             max_tokens=int(body.get("max_tokens", 1024)),
@@ -233,6 +316,54 @@ class _Handler(BaseHTTPRequestHandler):
                 },
             }
         )
+
+    def _handle_chat_stream(self, body: dict[str, Any]) -> None:
+        """One conversational turn, streamed token by token over SSE.
+
+        This exists for the web UI. At ~14 tok/s a forty-token reply takes about three
+        seconds, so waiting for the whole thing before showing anything is the
+        difference between a conversation and a progress bar.
+        """
+        text = str(body.get("message", "")).strip()
+        if not text:
+            self._send({"error": "message is required"}, 400)
+            return
+
+        messages, memory, session_id = self._compose(text, body)
+
+        self._open_stream()
+        self._event("state", {"activity": "THINKING"})
+
+        parts: list[str] = []
+        finish = "stop"
+        try:
+            for token in self.runtime.model.stream(
+                messages,
+                max_tokens=int(body.get("max_tokens", 1024)),
+                temperature=float(body.get("temperature", 0.7)),
+            ):
+                if token.text:
+                    parts.append(token.text)
+                    self._event("token", {"text": token.text})
+                if token.finish_reason is not None:
+                    finish = token.finish_reason
+        except BrokenPipeError:
+            # The browser navigated away mid-generation. Nothing to report to, and the
+            # turn is incomplete, so it is deliberately not written to memory.
+            _log.info("stream client disconnected")
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.exception("stream failed")
+            self._event("error", {"error": f"{type(exc).__name__}: {exc}"})
+            return
+
+        reply = "".join(parts)
+        if memory is not None and reply:
+            memory.remember_turn("user", text, session_id=session_id)
+            memory.remember_turn("assistant", reply, session_id=session_id)
+
+        self._event("done", {"finish_reason": finish, "reply": reply})
+        self._event("state", {"activity": "IDLE"})
 
     def _handle_task(self, body: dict[str, Any]) -> None:
         """Run a multi-step agent task."""

@@ -44,6 +44,12 @@ arc-kill = "arc.audit.killswitch:main"
 [tool.setuptools.packages.find]
 include = ["arc*"]
 
+# The web UI is hand-written HTML/CSS/ES modules with no build step, so it ships as
+# package data. Without this it is missing from an installed ARC and `arc serve`
+# returns 404 for the UI while working fine from a source checkout.
+[tool.setuptools.package-data]
+arc = ["interface/webui/*.html", "interface/webui/*.css", "interface/webui/*.js"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
