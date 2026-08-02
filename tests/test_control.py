@@ -207,6 +207,43 @@ def test_overlay_does_not_outlive_an_exception() -> None:
     assert session._overlay is None
 
 
+# ── Being stoppable ─────────────────────────────────────────────────────────────
+
+
+def test_holding_control_registers_with_the_kill_switch() -> None:
+    """``arc-kill`` and the abort phrase both work off these PID files.
+
+    A process holding the mouse without one is a process the documented ways of
+    stopping it cannot see.
+    """
+    from arc.audit.killswitch import KillSwitch
+
+    session = cs.ControlSession(show_overlay=False, watch_for_takeover=False)
+    session.acquire()
+    try:
+        names = [entry.name for entry in KillSwitch().registered()]
+        assert cs.KILL_SWITCH_NAME in names
+    finally:
+        session.release("test")
+
+
+def test_releasing_control_deregisters() -> None:
+    """Otherwise every finished session leaves a corpse for arc-kill to report."""
+    from arc.audit.killswitch import KillSwitch
+
+    session = cs.ControlSession(show_overlay=False, watch_for_takeover=False)
+    session.acquire()
+    session.release("test")
+    assert [e.name for e in KillSwitch().registered()] == []
+
+
+def test_the_abort_phrase_is_the_kill_command() -> None:
+    """The panel tells the user to type the same thing they would type in a shell."""
+    from arc.control import overlay
+
+    assert overlay.KILL_PHRASE == "arc-kill"
+
+
 def test_accent_is_the_documented_blue() -> None:
     from arc.control import overlay
 

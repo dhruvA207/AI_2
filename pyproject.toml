@@ -27,6 +27,18 @@ llamacpp = [
     "llama-cpp-python>=0.3",  # MIT — portable GGUF: CPU/Metal/CUDA
     "huggingface-hub>=0.23",  # Apache-2.0
 ]
+# Speech in and out. Apple's frameworks rather than Whisper: mlx-whisper is MIT itself
+# but pulls torch/scipy/numba/numpy (BSD-2, BSD-3, BSL-1.0) and tqdm (MPL-2.0), which
+# breaks the Apache-2.0/MIT rule in §0.1 — and ~3 GB against an 11.5 GB budget.
+voice = [
+    "pyobjc-framework-Speech>=10",        # MIT — SFSpeechRecognizer, on-device
+    "pyobjc-framework-AVFoundation>=10",  # MIT — AVAudioEngine input tap
+]
+# The app window. WebKit rendering an ARC-owned NSWindow, rather than a browser tab or
+# a browser-embedding library that would bring its own dependency tree (§7).
+app = [
+    "pyobjc-framework-WebKit>=10",  # MIT — WKWebView in an NSWindow
+]
 dev = [
     "pytest>=8.0",   # MIT
     "ruff>=0.6",     # MIT
@@ -63,6 +75,9 @@ ignore = ["ANN401"]  # Any is legitimate in the config/JSON boundary layers.
 # Cocoa selectors are camelCase by mandate — drawRect_ and isOpaque are the names
 # AppKit calls, and renaming them means they are simply never invoked.
 "arc/control/overlay.py" = ["N802"]
+# Same mandate on the audio side: AVFoundation and Speech are framework names, and
+# `import AVFoundation as av` would be a rename of Apple's own module.
+"arc/voice/macos.py" = ["N806", "N814"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -79,7 +94,8 @@ module = [
     "mlx.*", "mlx_lm.*", "llama_cpp.*", "huggingface_hub.*",
     "sqlite_vec.*", "onnxruntime.*", "tokenizers.*",
     "Quartz.*", "AppKit.*", "objc.*", "ApplicationServices.*",
-    "Vision.*", "Foundation.*",
+    "Vision.*", "Foundation.*", "Speech.*", "AVFoundation.*", "WebKit.*",
+    "sounddevice.*",
 ]
 ignore_missing_imports = true
 

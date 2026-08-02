@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from arc.control import session as control_session
+from arc.control.events import ARC_EVENT_TAG
 from arc.errors import ControlError
 from arc.log import get_logger
 
@@ -93,6 +94,16 @@ def _modifier_flags(quartz: Any, modifiers: list[str]) -> int:
     return flags
 
 
+def _post(quartz: Any, event: Any) -> None:
+    """Stamp an event as ARC's own and deliver it.
+
+    The stamp is what stops the kill box from reacting to keystrokes the agent typed
+    itself. See :mod:`arc.control.events`.
+    """
+    quartz.CGEventSetIntegerValueField(event, quartz.kCGEventSourceUserData, ARC_EVENT_TAG)
+    quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+
+
 def pointer() -> tuple[float, float]:
     """Return the current pointer position."""
     position = control_session.pointer_position()
@@ -120,7 +131,7 @@ def move_to(x: float, y: float, *, smooth: bool = True) -> None:
         event = quartz.CGEventCreateMouseEvent(
             None, quartz.kCGEventMouseMoved, (current_x, current_y), 0
         )
-        quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+        _post(quartz, event)
         # Tell the session where we put it, so its own motion is not read as a takeover.
         session.note_pointer((current_x, current_y))
         if steps > 1:
@@ -164,7 +175,7 @@ def click(
             # Click count must be set for double-clicks to register as such rather
             # than as two unrelated single clicks.
             quartz.CGEventSetIntegerValueField(event, quartz.kCGMouseEventClickState, index + 1)
-            quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+            _post(quartz, event)
             time.sleep(0.01)
         time.sleep(EVENT_DELAY)
 
@@ -178,7 +189,7 @@ def drag(from_x: float, from_y: float, to_x: float, to_y: float) -> None:
     session.check()
 
     down = quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseDown, (from_x, from_y), 0)
-    quartz.CGEventPost(quartz.kCGHIDEventTap, down)
+    _post(quartz, down)
     time.sleep(0.05)
 
     for index in range(1, MOVE_STEPS + 1):
@@ -189,12 +200,12 @@ def drag(from_x: float, from_y: float, to_x: float, to_y: float) -> None:
             from_y + (to_y - from_y) * progress,
         )
         event = quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseDragged, current, 0)
-        quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+        _post(quartz, event)
         session.note_pointer(current)
         time.sleep(0.012)
 
     up = quartz.CGEventCreateMouseEvent(None, quartz.kCGEventLeftMouseUp, (to_x, to_y), 0)
-    quartz.CGEventPost(quartz.kCGHIDEventTap, up)
+    _post(quartz, up)
     session.note_pointer((to_x, to_y))
     time.sleep(EVENT_DELAY)
 
@@ -212,7 +223,7 @@ def scroll(amount: int, *, horizontal: bool = False) -> None:
         0 if horizontal else amount,
         amount if horizontal else 0,
     )
-    quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+    _post(quartz, event)
     time.sleep(EVENT_DELAY)
 
 
@@ -232,7 +243,7 @@ def type_text(text: str) -> None:
         for pressed in (True, False):
             event = quartz.CGEventCreateKeyboardEvent(None, 0, pressed)
             quartz.CGEventKeyboardSetUnicodeString(event, len(character), character)
-            quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+            _post(quartz, event)
         # Fast enough to feel like typing, slow enough that applications keep up.
         time.sleep(0.008)
 
@@ -260,7 +271,7 @@ def press(key: str, *modifiers: str) -> None:
         event = quartz.CGEventCreateKeyboardEvent(None, code, pressed)
         if flags:
             quartz.CGEventSetFlags(event, flags)
-        quartz.CGEventPost(quartz.kCGHIDEventTap, event)
+        _post(quartz, event)
         time.sleep(0.01)
     time.sleep(EVENT_DELAY)
 

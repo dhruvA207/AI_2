@@ -41,11 +41,10 @@ DEFAULT_PORT = 8787
 #: Kept in step with the REPL's prompt in arc/interface/chat.py. Both paths inject
 #: memories the same way, so both need the same instructions about how to use them.
 DEFAULT_SYSTEM = (
-    "You are ARC, a local-first assistant running on Dhruv's own machine. "
-    "You have persistent memory of past conversations. When memories are provided "
-    "below, use them naturally — do not announce that you are recalling something, "
-    "and never copy the bracketed provenance markers into your reply. "
-    "If a memory carries a source URL, cite it when you rely on it. Be concise."
+    "You are ARC, a local-first assistant on Dhruv's machine, with memory of past "
+    "conversations. Use any memories below naturally; never copy their bracketed "
+    "provenance markers into your reply, and cite a source URL when you rely on one. "
+    "Be concise."
 )
 
 #: Loopback only, and deliberately not configurable. See the module docstring.
@@ -86,7 +85,17 @@ class Runtime:
         self._lock = threading.Lock()
         self._model: Any = None
         self._memory: Any = None
+        self._voice: Any = None
         self.requests = 0
+        #: One generation at a time. The MLX backend is not reentrant, and voice makes
+        #: overlapping turns easy to trigger, so this serialises them instead of letting
+        #: two streams interleave into the same model.
+        self.generation = threading.Lock()
+        #: Most recent microphone amplitude, 0..1. Polled by the UI rather than pushed
+        #: per sample: it updates ~90 times a second and only the latest value matters.
+        self.level = 0.0
+        #: Event queues, one per open /events stream.
+        self.listeners: list[Any] = []
 
     @property
     def model(self) -> Any:
@@ -99,6 +108,97 @@ class Runtime:
                 self._model = router.load_model(self.config, "chat")
                 _log.info("model warm", extra={"seconds": round(time.perf_counter() - started, 2)})
             return self._model
+
+    @property
+    def voice(self) -> Any:
+        """The voice session, built on first use.
+
+        Building it does *not* open the microphone — ``VoiceSession`` rests muted, and
+        only ``start_listening`` (⌘S) opens anything. Returns None when speech support
+        is unavailable so the UI degrades to text instead of erroring.
+        """
+        with self._lock:
+            if self._voice is None and self.config.get("voice.enabled", True):
+                from arc import voice as voice_mod
+
+                if str(self.config.get("voice.mode", "local")).lower() == "live":
+                    return self._live_session()
+                if not voice_mod.available():
+                    return None
+                from arc.audit import AuditLogger
+
+                audit = (
+                    AuditLogger(
+                        fsync=bool(self.config.get("audit.fsync", False)),
+                        max_field_chars=int(self.config.get("audit.max_field_chars", 4000)),
+                    )
+                    if self.config.get("audit.enabled", True)
+                    else None
+                )
+                self._voice = voice_mod.build(
+                    self.config,
+                    audit=audit,
+                    on_transcript=self._push_transcript,
+                    on_level=self._push_level,
+                )
+            return self._voice
+
+    def _live_session(self) -> Any:
+        """Build the Gemini Live session. Caller holds the lock.
+
+        Not a drop-in for the local path: Live *answers as well as speaks*, so ARC's
+        own model, memory and tools take no part in the turn. That is why it is behind
+        ``voice.mode`` rather than being the default — it is much faster and it is a
+        different assistant.
+        """
+        from arc.audit import AuditLogger
+        from arc.voice.gemini import load_api_key
+        from arc.voice.live import LiveSession
+
+        key = load_api_key()
+        if not key:
+            _log.warning("voice.mode is 'live' but no Gemini API key was found")
+            return None
+
+        audit = (
+            AuditLogger(
+                fsync=bool(self.config.get("audit.fsync", False)),
+                max_field_chars=int(self.config.get("audit.max_field_chars", 4000)),
+            )
+            if self.config.get("audit.enabled", True)
+            else None
+        )
+        section = self.config.section("voice")
+        self._voice = _LiveAdapter(
+            LiveSession(
+                key,
+                voice=str(section.get("voice", "Iapetus")),
+                silence_ms=int(section.get("silence_ms", 400)),
+                system_prompt=DEFAULT_SYSTEM,
+                on_transcript=lambda text, final: self._push_transcript_text(text, final),
+                on_level=self._push_level,
+                on_state=self._push_state,
+                audit=audit,
+            )
+        )
+        return self._voice
+
+    def _push_state(self, activity: str) -> None:
+        for queue in list(self.listeners):
+            queue.append(("state", {"activity": activity}))
+
+    def _push_transcript_text(self, text: str, final: bool) -> None:
+        for queue in list(self.listeners):
+            queue.append(("transcript", {"text": text, "final": final}))
+
+    def _push_transcript(self, transcript: Any) -> None:
+        for queue in list(self.listeners):
+            queue.append(("transcript", {"text": transcript.text, "final": transcript.is_final}))
+
+    def _push_level(self, level: float) -> None:
+        # Coalesced rather than queued: levels arrive ~90 times a second and only the
+        # most recent one matters, so a slow client must not accumulate a backlog.
+        self.level = level
 
     @property
     def memory(self) -> Any:
@@ -125,6 +225,70 @@ class Runtime:
         """Release the memory database."""
         if self._memory is not None:
             self._memory.close()
+
+
+class _LiveAdapter:
+    """Presents a ``LiveSession`` through the same surface as ``VoiceSession``.
+
+    So ``/voice/status``, ``/voice/toggle`` and ⌘S do not have to know which mode is
+    running. ``toggle`` opens the WebSocket on first use and then only gates the
+    microphone — reconnecting per turn would put a handshake in front of every reply,
+    which is the latency this mode exists to remove.
+    """
+
+    def __init__(self, session: Any) -> None:
+        self._session: Any = session
+        self.recognizer = _Named(f"gemini-live:{session._model.rsplit('/', 1)[-1]}", False)
+        self.synthesizer = _Named(
+            session.name if hasattr(session, "name") else "gemini-live", False
+        )
+
+    @property
+    def listening(self) -> bool:
+        return self._session.is_open and not self._session.muted
+
+    @property
+    def speaking(self) -> bool:
+        return bool(self._session.is_speaking)
+
+    def toggle(self) -> bool:
+        if not self._session.is_open:
+            self._session.open()
+        self._session.set_muted(not self._session.muted)
+        return self.listening
+
+    def start_listening(self) -> None:
+        if not self._session.is_open:
+            self._session.open()
+        self._session.set_muted(False)
+
+    def stop_listening(self) -> None:
+        self._session.set_muted(True)
+
+    def interrupt(self) -> None:
+        self._session.set_muted(True)
+        self._session.set_muted(False)
+
+    def reset(self) -> None:
+        return None
+
+    def feed(self, text: str) -> None:
+        """No-op: Gemini speaks its own answer, so nothing is fed to a synthesiser."""
+        return None
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self._session.close()
+
+
+class _Named:
+    """Minimal stand-in so status reporting works for both modes."""
+
+    def __init__(self, name: str, on_device: bool) -> None:
+        self.name = name
+        self.on_device = on_device
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -220,6 +384,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(self.runtime.status())
             elif route.path == "/" or route.path.startswith("/ui/"):
                 self._serve_static(route.path)
+            elif route.path == "/voice/status":
+                self._send(self._voice_status())
+            elif route.path == "/events":
+                self._handle_events()
             elif route.path == "/memory/search":
                 self._handle_memory_search(query)
             elif route.path == "/tools":
@@ -244,8 +412,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._handle_chat(body)
             elif route.path == "/chat/stream":
                 self._handle_chat_stream(body)
+            elif route.path == "/do/stream":
+                self._handle_task_stream(body)
             elif route.path == "/do":
                 self._handle_task(body)
+            elif route.path == "/voice/toggle":
+                self._handle_voice_toggle()
+            elif route.path == "/voice/interrupt":
+                self._handle_voice_interrupt()
             elif route.path == "/memory/add":
                 self._handle_memory_add(body)
             else:
@@ -334,6 +508,20 @@ class _Handler(BaseHTTPRequestHandler):
         self._open_stream()
         self._event("state", {"activity": "THINKING"})
 
+        # Speak sentence by sentence as generation proceeds, unless the caller opted
+        # out. At ~14 tok/s, waiting for the whole reply means seconds of silence.
+        session = self.runtime.voice if body.get("speak", True) else None
+        if session is not None:
+            session.reset()
+
+        # A second turn arriving mid-generation is dropped rather than queued: by the
+        # time the first finishes the second is stale, and queueing them is how you end
+        # up answering a question nobody is still waiting for.
+        if not self.runtime.generation.acquire(blocking=False):
+            self._event("error", {"error": "busy"})
+            self._event("state", {"activity": "IDLE"})
+            return
+
         parts: list[str] = []
         finish = "stop"
         try:
@@ -345,8 +533,12 @@ class _Handler(BaseHTTPRequestHandler):
                 if token.text:
                     parts.append(token.text)
                     self._event("token", {"text": token.text})
+                    if session is not None:
+                        session.feed(token.text)
                 if token.finish_reason is not None:
                     finish = token.finish_reason
+            if session is not None:
+                session.flush()
         except BrokenPipeError:
             # The browser navigated away mid-generation. Nothing to report to, and the
             # turn is incomplete, so it is deliberately not written to memory.
@@ -356,6 +548,10 @@ class _Handler(BaseHTTPRequestHandler):
             _log.exception("stream failed")
             self._event("error", {"error": f"{type(exc).__name__}: {exc}"})
             return
+        finally:
+            # Every exit above returns early, so releasing anywhere else would leak the
+            # lock and wedge every later turn behind a generation that already ended.
+            self.runtime.generation.release()
 
         reply = "".join(parts)
         if memory is not None and reply:
@@ -364,6 +560,99 @@ class _Handler(BaseHTTPRequestHandler):
 
         self._event("done", {"finish_reason": finish, "reply": reply})
         self._event("state", {"activity": "IDLE"})
+
+    # ── voice ───────────────────────────────────────────────────────────────────
+
+    def _voice_status(self) -> dict[str, Any]:
+        session = self.runtime.voice
+        if session is None:
+            return {"available": False, "listening": False, "reason": "speech support unavailable"}
+        mode = str(self.runtime.config.get("voice.mode", "local")).lower()
+        return {
+            "available": True,
+            "mode": mode,
+            "listening": session.listening,
+            "speaking": session.speaking,
+            "recognizer": session.recognizer.name,
+            "on_device": session.recognizer.on_device,
+            "synthesizer": session.synthesizer.name,
+            # In live mode Gemini answers directly, so the UI must NOT post the
+            # transcript to /chat/stream — doing so would run a second, local reply
+            # on top of the one already being spoken.
+            "answers_itself": mode == "live",
+        }
+
+    def _handle_voice_toggle(self) -> None:
+        """Open or close the microphone. This is what ⌘S calls."""
+        session = self.runtime.voice
+        if session is None:
+            self._send({"error": "speech support unavailable"}, 400)
+            return
+        try:
+            listening = session.toggle()
+            # Tell every open page. Without this the UI only learns the mic state at
+            # load, so a change made anywhere else leaves the two disagreeing — and
+            # since the UI posts a toggle whenever its own state changes, the
+            # disagreement turns into the two of them flipping the mic back and forth.
+            for queue in list(self.runtime.listeners):
+                queue.append(("voice", {"listening": listening}))
+        except ArcError as exc:
+            # The on-device refusal lands here, and it must reach the UI verbatim
+            # rather than as a generic failure.
+            self._send({"error": str(exc)}, 400)
+            return
+        self._send({"listening": listening})
+
+    def _handle_voice_interrupt(self) -> None:
+        session = self.runtime.voice
+        if session is not None:
+            session.interrupt()
+        self._send({"ok": True})
+
+    def _handle_events(self) -> None:
+        """Long-lived SSE stream carrying microphone level and transcripts.
+
+        Separate from ``/chat/stream`` because it outlives any one turn: the level has
+        to keep flowing while you are speaking, which is *before* there is a turn.
+        """
+        from collections import deque
+
+        queue: deque[tuple[str, dict[str, Any]]] = deque(maxlen=64)
+        self.runtime.listeners.append(queue)
+
+        self._open_stream()
+        last_level = -1.0
+        last_ping = time.time()
+        try:
+            while True:
+                while queue:
+                    event, payload = queue.popleft()
+                    self._event(event, payload)
+
+                level = round(self.runtime.level, 3)
+                if level != last_level:
+                    self._event("level", {"level": level})
+                    last_level = level
+
+                # Keepalive. While the microphone is closed the level never changes, so
+                # nothing is written and the connection sits idle — which WebKit drops,
+                # logged server-side as ConnectionResetError. The page reconnects, but
+                # every event in the gap is lost: a four-tool task showed one orb
+                # because the other three arrived while nobody was listening. A comment
+                # frame is ignored by EventSource and keeps the socket alive.
+                now = time.time()
+                if now - last_ping >= 10:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    last_ping = now
+
+                # ~30 Hz: fast enough for the orb, slow enough to stay cheap.
+                time.sleep(0.033)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the page went away
+        finally:
+            if queue in self.runtime.listeners:
+                self.runtime.listeners.remove(queue)
 
     def _handle_task(self, body: dict[str, Any]) -> None:
         """Run a multi-step agent task."""
@@ -383,6 +672,90 @@ class _Handler(BaseHTTPRequestHandler):
             dry_run=bool(body.get("dry_run", False)),
         )
         self._send(agent.run(task).to_dict())
+
+    def _handle_task_stream(self, body: dict[str, Any]) -> None:
+        """Run an agent task, reporting each tool call as it happens.
+
+        ``/do`` returns one JSON blob when everything has finished, which for a
+        multi-step task is up to a minute of apparent nothing. This reports each call
+        at the moment it starts, so the UI can show the work rather than a spinner.
+        """
+        from arc.agent.loop import Agent, Step
+        from arc.tools import registry
+
+        task = str(body.get("task", "")).strip()
+        if not task:
+            self._send({"error": "task is required"}, 400)
+            return
+
+        if not self.runtime.generation.acquire(blocking=False):
+            self._send({"error": "busy"}, 409)
+            return
+
+        self._open_stream()
+        self._event("state", {"activity": "THINKING"})
+
+        # Sent to this response *and* broadcast to every open /events stream. The UI
+        # should show what ARC is doing whoever asked it — a task started from the CLI
+        # or another window is still ARC working, and an orb that only appears for the
+        # client that happened to make the request is a status display that lies.
+        def emit(event: str, payload: dict[str, Any]) -> None:
+            self._event(event, payload)
+            for queue in list(self.runtime.listeners):
+                queue.append((event, payload))
+
+        def started(step: Step) -> None:
+            emit(
+                "tool_start",
+                {
+                    "call_id": step.number,
+                    "name": step.tool,
+                    "category": registry.category_of(step.tool or ""),
+                    "arguments": step.arguments,
+                },
+            )
+
+        def finished(step: Step) -> None:
+            observation = step.observation
+            emit(
+                "tool_end",
+                {
+                    "call_id": step.number,
+                    "name": step.tool,
+                    "ok": bool(observation.ok) if observation is not None else False,
+                    "result": observation.render() if observation is not None else None,
+                },
+            )
+
+        try:
+            agent = Agent(
+                self.runtime.model,
+                registry,
+                memory=self.runtime.memory,
+                max_steps=int(body.get("max_steps", 12)),
+                dry_run=bool(body.get("dry_run", False)),
+                on_tool_start=started,
+                on_step=finished,
+            )
+            result = agent.run(task)
+        except BrokenPipeError:
+            _log.info("task stream client disconnected")
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.exception("task stream failed")
+            self._event("error", {"error": f"{type(exc).__name__}: {exc}"})
+            return
+        finally:
+            self.runtime.generation.release()
+
+        session = self.runtime.voice if body.get("speak", True) else None
+        if session is not None and result.answer:
+            session.reset()
+            session.feed(result.answer)
+            session.flush()
+
+        self._event("done", {"reply": result.answer, "tools_used": result.tools_used})
+        self._event("state", {"activity": "IDLE"})
 
     def _handle_memory_search(self, query: dict[str, list[str]]) -> None:
         """Hybrid search over memory."""
@@ -470,11 +843,27 @@ def serve(config: Config, *, port: int = DEFAULT_PORT, preload: bool = True) -> 
     write_endpoint(port)
     print(f"ARC listening on http://{BIND_HOST}:{port} (loopback only)", flush=True)
 
+    # The HTTP server runs on a background thread so the *main* thread is free to pump
+    # the macOS run loop. Speech results are delivered on the main queue, so without
+    # this the microphone captures audio and no transcript ever arrives — levels move,
+    # nothing is transcribed, and nothing errors. Everything else works either way, so
+    # the pump only runs when speech support is actually present.
+    thread = threading.Thread(target=server.serve_forever, name="arc-http", daemon=True)
+    thread.start()
+
+    stop = threading.Event()
     try:
-        server.serve_forever()
+        from arc import voice as voice_mod
+
+        if config.get("voice.enabled", True) and voice_mod.available():
+            voice_mod.pump(stop)
+        else:
+            while not stop.wait(0.5):
+                pass
     except KeyboardInterrupt:
         print("\nshutting down", flush=True)
     finally:
+        stop.set()
         clear_endpoint()
         server.shutdown()
         runtime.close()

@@ -262,6 +262,15 @@ class ToolRegistry:
     def __len__(self) -> int:
         return len(self.tools)
 
+    def category_of(self, name: str) -> str:
+        """Which category a tool belongs to, or ``general`` if it is unknown.
+
+        Never raises: this is used to colour a UI element, and a tool that has been
+        renamed should not take a request down with it.
+        """
+        tool = self.tools.get(name)
+        return tool.category if tool is not None else "general"
+
     def schemas(self, *, categories: list[str] | None = None) -> list[ToolSchema]:
         """Return schemas for the model, optionally filtered by category."""
         selected = [

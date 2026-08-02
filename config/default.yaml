@@ -32,6 +32,65 @@ audit:
   # cannot make the log unreadable.
   max_field_chars: 4000
 
+voice:
+  # How a voice turn is handled.
+  #   local — Apple on-device recognition -> ARC's own model (memory + 28 tools) ->
+  #           Gemini TTS. Keeps ARC as the brain. Measured ~4.3s to first audio, of
+  #           which 2.7s is the separate TTS round-trip.
+  #   live  — one Gemini Live WebSocket, native audio both ways, the way JARVIS works.
+  #           No separate synthesis step, so far faster. But GEMINI ANSWERS, NOT ARC:
+  #           the local model, memory and tools are bypassed, and your microphone
+  #           audio streams to Google rather than staying on this Mac.
+  # Measured: live 2.0s from you stopping to ARC speaking; local ~4.0s, of which 2.7s
+  # is the separate TTS round-trip. Local is also mute right now — the REST TTS quota
+  # is exhausted. Switch back to `local` to keep ARC's own model, memory and tools in
+  # the loop, at the cost of speed.
+  mode: live
+
+  # Rests muted. The microphone is never opened at startup; ⌘S in the web UI (or
+  # `arc voice listen`) is what opens it, and every session is written to the audit log.
+  enabled: true
+
+  # Recognition locale. Only en-US has an on-device speech asset on this machine —
+  # en-GB and en-IN report "No Assistant asset for language" and would send your audio
+  # to Apple's servers. Changing this away from en-US will be REFUSED while
+  # require_on_device is true, which is the point: it fails loudly instead of quietly
+  # going online.
+  locale: en-US
+
+  # Refuse to recognise at all if it cannot be done on this machine. ARC is
+  # local-first; turning this off is your call, and it is the only way to use a
+  # locale without an on-device asset.
+  require_on_device: true
+
+  # How ARC sounds. Gemini is the ONLY speech engine — the macOS voices were not good
+  # enough and have been removed, so there is no local fallback.
+  #
+  # THIS IS THE ONE PART OF ARC THAT LEAVES THE MACHINE. The text ARC speaks is sent to
+  # Google to be synthesised. Everything else — the model, memory, recognition — stays
+  # on this Mac (§0). Every request is audited, and `arc voice status` says so outright.
+  # Needs a key: GEMINI_API_KEY, or `gemini_api_key:` in config/secrets.yaml.
+  #
+  # Iapetus is the voice JARVIS uses. `arc voice status` lists every available name.
+  voice: Iapetus
+  model: gemini-2.5-flash-preview-tts
+
+  # Stop speaking the moment you start. Without this you have to wait ARC out.
+  barge_in: true
+
+  # End-of-utterance detection. Apple only marks a result final when the audio stream
+  # ends, so while the mic stays open you get partials forever and nothing ever fires.
+  # ARC decides an utterance is over when the level stays within `speech_margin` of
+  # the tracked room noise floor for `silence_ms`. Relative, not absolute: a fixed
+  # threshold failed outright here, with 94% of samples above it in an ordinary room.
+  # Raise silence_ms if it cuts you off mid-thought; raise speech_margin if background
+  # noise keeps registering as speech.
+  # 400 ms matches what JARVIS settled on. It was 900, which is a fifth of the whole
+  # response time spent waiting to be sure you had stopped talking. Raise it if it
+  # starts cutting you off mid-thought.
+  silence_ms: 400
+  speech_margin: 0.12
+
 web:
   # BRIEF §4.4 asks ARC to respect robots.txt. Turning this off is your call to make —
   # §0.3 says ARC does not negotiate access on your behalf — but it stays on by

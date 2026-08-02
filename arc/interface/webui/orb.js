@@ -224,20 +224,28 @@ export class OrbRenderer {
     this.hits.length = 0;
     const tools = st.activeTools();
     if (tools.length) {
-      const colX = this.w / 2 + base * 2.15;
-      const span = Math.min(this.h * 0.62, tools.length * base * 0.92);
-      const step = tools.length > 1 ? span / (tools.length - 1) : 0;
-      const top = this.h / 2 - span / 2;
+      // Distributed around the centre orb, not stacked in a column. Each tool keeps a
+      // fixed angle for its whole life so it does not jump when a sibling finishes and
+      // the list re-indexes — the angle comes from the orb's own id, not its position.
+      // The ring is elliptical because the window is wider than it is tall, and a
+      // circular ring would crowd the top and bottom while leaving the sides empty.
+      const ringX = Math.min(this.w * 0.34, base * 2.6);
+      const ringY = Math.min(this.h * 0.34, base * 1.9);
 
-      tools.forEach((tool, i) => {
+      tools.forEach((tool) => {
         if (!this.spawns.has(tool.id)) this.spawns.set(tool.id, ts);
         const age = (ts - this.spawns.get(tool.id)) / 1000;
         const grow = this.reduce ? 1 : Math.min(1, age / 0.42);
         const ease = 1 - Math.pow(1 - grow, 3);
 
-        const drift = this.reduce ? 0 : Math.sin(t * 0.7 + i * 1.7) * base * 0.07;
-        const cx = colX + (this.reduce ? 0 : Math.cos(t * 0.5 + i) * base * 0.05);
-        const cy = top + step * i + drift;
+        // Golden-angle spacing off the id: consecutive tools land far apart, and any
+        // number of them stay evenly spread without knowing the total in advance.
+        const i = tool.id;
+        const angle = i * 2.39996 - Math.PI / 2 + (this.reduce ? 0 : t * 0.06);
+        const wobble = this.reduce ? 1 : 1 + 0.05 * Math.sin(t * 0.8 + i * 1.7);
+
+        const cx = this.w / 2 + Math.cos(angle) * ringX * wobble;
+        const cy = this.h / 2 + Math.sin(angle) * ringY * wobble;
 
         const running = tool.state === 'running';
         // A running tool breathes; a finished one goes quiet and just sits there.

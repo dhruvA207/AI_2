@@ -226,6 +226,96 @@ def _check_permissions() -> list[Check]:
     except Exception:
         checks.append(Check("accessibility", "warn", "could not determine"))
 
+    checks.extend(_check_voice())
+    return checks
+
+
+def _require_config_quietly() -> Config:
+    """Load config for a diagnostic, falling back to defaults rather than failing.
+
+    ``doctor`` must still report everything else it can when config is broken; that
+    failure is already surfaced by its own check.
+    """
+    try:
+        return Config.load()
+    except ArcError:
+        return Config.load(use_env=False)
+
+
+def _check_voice() -> list[Check]:
+    """Report speech grants and whether recognition can stay on-device.
+
+    Both fail silently in their own way: without the microphone grant the tap returns
+    silence forever, and without an on-device asset recognition quietly goes to Apple's
+    servers instead of refusing.
+    """
+    from arc import voice as voice_mod
+
+    if not voice_mod.available():
+        return [
+            Check(
+                "speech",
+                "warn",
+                "bindings absent — pip install 'arc[voice]' to talk to ARC",
+            )
+        ]
+
+    from arc.voice.macos import ON_DEVICE_LOCALE, authorization
+
+    checks: list[Check] = []
+    grants = authorization()
+    for label, key, hint in (
+        ("microphone", "microphone", "Privacy & Security > Microphone"),
+        ("speech recognition", "speech", "Privacy & Security > Speech Recognition"),
+    ):
+        value = grants.get(key, "unknown")
+        checks.append(
+            Check(
+                label,
+                "ok" if value == "granted" else "warn",
+                value
+                if value == "granted"
+                else f"{value} — System Settings > {hint}. Run `arc voice grant` to prompt",
+            )
+        )
+
+    from arc.voice.gemini import load_api_key
+
+    if load_api_key():
+        checks.append(
+            Check(
+                "speech output",
+                "warn",
+                "gemini — the text ARC speaks is sent to Google. This is the only "
+                "part of ARC that leaves the machine",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "speech output",
+                "warn",
+                "no Gemini key, so ARC cannot speak. Set GEMINI_API_KEY or add "
+                "gemini_api_key to config/secrets.yaml. Recognition is unaffected",
+            )
+        )
+
+    try:
+        from arc.voice.macos import AppleRecognizer
+
+        recognizer = AppleRecognizer(require_on_device=False)
+        checks.append(
+            Check(
+                "on-device speech",
+                "ok" if recognizer.on_device else "warn",
+                f"{ON_DEVICE_LOCALE} runs locally"
+                if recognizer.on_device
+                else "no local asset — recognition would use Apple's servers and is refused",
+            )
+        )
+    except Exception as exc:
+        checks.append(Check("on-device speech", "warn", f"could not determine: {exc}"))
+
     return checks
 
 
@@ -534,6 +624,132 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     web_tools.configure(config)
     return server.serve(config, port=args.port, preload=not args.lazy)
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Open ARC in its own window.
+
+    The HTTP server runs in this same process on a background thread, so this is one
+    command and one process rather than a server plus a browser. The main thread goes
+    to AppKit, whose run loop is also the one speech recognition needs pumped —
+    ``SFSpeechRecognitionTask`` delivers on the main queue.
+    """
+    import threading
+
+    from arc.interface import app, server
+
+    if not app.available():
+        print("the app window needs pyobjc-framework-WebKit: pip install 'arc[app]'")
+        return 1
+
+    config = _require_config(args)
+    port = args.port or int(config.get("server.port", server.DEFAULT_PORT))
+
+    if not args.no_serve:
+        runtime = server.Runtime(config)
+        handler = type("BoundHandler", (server._Handler,), {"runtime": runtime})
+        from http.server import ThreadingHTTPServer
+
+        httpd = ThreadingHTTPServer((server.BIND_HOST, port), handler)
+        httpd.daemon_threads = True
+        threading.Thread(target=httpd.serve_forever, name="arc-http", daemon=True).start()
+        server.write_endpoint(port)
+        print(f"ARC serving on http://{server.BIND_HOST}:{port} (loopback only)")
+
+    try:
+        return app.run(f"http://{server.BIND_HOST}:{port}/")
+    finally:
+        if not args.no_serve:
+            server.clear_endpoint()
+
+
+def _print_transcript(transcript: Any) -> None:
+    """Print a partial in place, a final on its own line."""
+    mark = "*" if transcript.is_final else "."
+    end = "\n" if transcript.is_final else ""
+    print(f"\r{mark} {transcript.text}", end=end, flush=True)
+
+
+def cmd_voice(args: argparse.Namespace) -> int:
+    """Check, grant, or exercise speech support."""
+    import threading
+    import time
+
+    from arc import voice as voice_mod
+
+    if not voice_mod.available():
+        print("speech support is unavailable. pip install 'arc[voice]'")
+        return 1
+
+    from arc.voice.macos import authorization, request_authorization
+
+    if args.voice_command == "status":
+        session = voice_mod.build(_require_config(args))
+        grants = authorization()
+        speech_is_local = False
+        state = {
+            "recognizer": session.recognizer.name,
+            "on_device": session.recognizer.on_device,
+            "synthesizer": session.synthesizer.name,
+            # Stated outright rather than left to be inferred from the engine name.
+            # This is the only part of ARC that leaves the machine, so it should be
+            # impossible to have it on without knowing.
+            "speech_stays_local": speech_is_local,
+            **grants,
+        }
+        if not args.json:
+            from arc.voice.gemini import VOICES
+
+            print("NOTE: speech output goes through Gemini — the text ARC speaks is sent")
+            print("      to Google. Recognition stays on this Mac.\n")
+            print(f"voices        {', '.join(VOICES[:10])} ...\n")
+        if args.json:
+            print(json.dumps(state, indent=2))
+        else:
+            for key, value in state.items():
+                print(f"{key:14} {value}")
+        return 0
+
+    if args.voice_command == "grant":
+        print("Requesting microphone and speech-recognition access…")
+        granted = request_authorization()
+        print("granted" if granted else "not granted — check System Settings > Privacy & Security")
+        return 0 if granted else 1
+
+    if args.voice_command == "say":
+        session = voice_mod.build(_require_config(args))
+        text = " ".join(args.text)
+        session.synthesizer.speak(text)
+        # speakUtterance_ is asynchronous, so the process has to outlive the audio or
+        # it exits mid-word.
+        while session.synthesizer.is_speaking:
+            time.sleep(0.1)
+        return 0
+
+    if args.voice_command == "listen":
+        session = voice_mod.build(
+            _require_config(args),
+            on_transcript=_print_transcript,
+        )
+        print(
+            f"Listening for {args.seconds:.0f}s on {session.recognizer.name} "
+            f"(on-device: {session.recognizer.on_device}). Speak…"
+        )
+        session.start_listening()
+        stop = threading.Event()
+        threading.Timer(args.seconds, stop.set).start()
+        try:
+            # The main thread has to pump the run loop or no transcript ever arrives.
+            voice_mod.pump(stop)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop.set()
+            session.close()
+        print("\nstopped")
+        return 0
+
+    return 1
 
 
 def cmd_control(args: argparse.Namespace) -> int:
@@ -996,6 +1212,25 @@ def _build_parser() -> argparse.ArgumentParser:
     control_sub.add_parser("status", help="is ARC controlling the mouse and keyboard?")
     control_sub.add_parser("release", help="take control back immediately")
     control_sub.add_parser("demo", help="show the control indicator for five seconds")
+
+    ui = sub.add_parser("ui", help="open ARC in its own window (starts the server too)")
+    ui.add_argument("--port", type=int, default=None, help="port for the local server")
+    ui.add_argument(
+        "--no-serve",
+        action="store_true",
+        help="attach to a server that is already running instead of starting one",
+    )
+    ui.set_defaults(func=cmd_ui)
+
+    voice = sub.add_parser("voice", help="check, grant, or test speech support")
+    voice.set_defaults(func=cmd_voice)
+    voice_sub = voice.add_subparsers(dest="voice_command", required=True)
+    voice_sub.add_parser("status", help="what the recogniser and voice are, and whether local")
+    voice_sub.add_parser("grant", help="trigger the macOS microphone and speech prompts")
+    say = voice_sub.add_parser("say", help="speak a line, to check how ARC sounds")
+    say.add_argument("text", nargs="+", help="what to say")
+    listen = voice_sub.add_parser("listen", help="transcribe from the microphone until Ctrl-C")
+    listen.add_argument("--seconds", type=float, default=15.0, help="how long to listen")
 
     tools = sub.add_parser("tools", help="list the tools available to the agent")
     tools.set_defaults(func=cmd_tools)

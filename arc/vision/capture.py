@@ -31,6 +31,9 @@ MAX_EDGE = 1400
 
 CAPTURE_TIMEOUT = 15.0
 
+#: Ceiling for the active display list query. Far more than any real desk.
+MAX_DISPLAYS = 16
+
 
 @dataclass(frozen=True, slots=True)
 class Screenshot:
@@ -44,20 +47,47 @@ class Screenshot:
     source_height: int
     display: int = 0
     captured_at: float = 0.0
+    #: Top-left corner of this capture in global screen space. Non-zero for any display
+    #: but the primary one, and for a region capture. Without it, a coordinate read off
+    #: a secondary display maps to the same spot on the *primary* one.
+    origin_x: float = 0.0
+    origin_y: float = 0.0
+    #: Size of the captured area in screen *points*, which is the unit clicks are
+    #: delivered in. On a Retina display this is half the pixel size. Zero means
+    #: unknown, in which case points are assumed to equal pixels.
+    screen_width: float = 0.0
+    screen_height: float = 0.0
 
     @property
     def scale(self) -> float:
-        """Factor to multiply image coordinates by to get screen coordinates.
-
-        Load-bearing: a vision model reports a button at (700, 400) in the *downscaled*
-        image, and clicking there without scaling lands somewhere else entirely.
-        """
+        """Factor from image pixels to source-image pixels — how much was downscaled."""
         return self.source_width / self.width if self.width else 1.0
 
+    @property
+    def point_scale(self) -> float:
+        """Factor from image pixels to screen points. The one that matters for clicking.
+
+        Distinct from :attr:`scale` because a Retina capture has two independent
+        conversions stacked on it: the downscale this class applied, and the display's
+        own backing scale factor. ``screencapture`` yields *pixels*, so a 1470-point
+        display produces a 2940-pixel image; multiplying an image coordinate by
+        :attr:`scale` alone lands twice as far right and twice as far down as intended.
+        """
+        if not self.width or not self.screen_width:
+            return self.scale
+        return self.screen_width / self.width
+
     def to_screen(self, x: float, y: float) -> tuple[float, float]:
-        """Map a coordinate in this image back to screen space."""
-        factor = self.scale
-        return (x * factor, y * factor)
+        """Map a coordinate in this image back to global screen space.
+
+        Two corrections, both load-bearing. The scale undoes the downscaling *and* the
+        display's backing scale factor, landing in points. The origin shift places the
+        result on the display it actually came from: a capture of a secondary display
+        starts at (0, 0) in its own image, but that pixel may be 1470 points to the
+        right in the space clicks are delivered in.
+        """
+        factor = self.point_scale
+        return (self.origin_x + x * factor, self.origin_y + y * factor)
 
     def as_base64(self) -> str:
         """Return the image encoded for a vision model."""
@@ -157,8 +187,12 @@ def capture(
     if region is not None:
         x, y, width, height = region
         command += ["-R", f"{x},{y},{width},{height}"]
+        # A region is already stated in global points, so it is its own origin and size.
+        origin = (float(x), float(y))
+        point_size = (float(width), float(height))
     else:
         command += ["-D", str(display + 1)]  # screencapture displays are 1-based
+        origin, point_size = _geometry_of(display)
     command.append(str(target))
 
     _run(command)
@@ -182,27 +216,78 @@ def capture(
         source_height=source_height,
         display=display,
         captured_at=time.time(),
+        origin_x=origin[0],
+        origin_y=origin[1],
+        screen_width=point_size[0],
+        screen_height=point_size[1],
     )
 
 
+def _geometry_of(display: int) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return a display's ``(origin, size)`` in global screen points.
+
+    Falls back to zeroes rather than raising: a capture is still a usable image without
+    geometry, and :func:`capture` is the read-only path that must keep working even
+    when the window server cannot be queried. A zero size makes ``point_scale`` fall
+    back to the pixel scale, which is correct on a non-Retina display and no worse than
+    the previous behaviour anywhere else.
+    """
+    bounds = _display_bounds()
+    if 0 <= display < len(bounds):
+        x, y, width, height = bounds[display]
+        return ((x, y), (width, height))
+    return ((0.0, 0.0), (0.0, 0.0))
+
+
 def displays() -> list[dict[str, Any]]:
-    """Return the attached displays and their geometry."""
+    """Return the attached displays and their geometry, in global screen space.
+
+    Uses ``CGDisplayBounds`` rather than ``NSScreen.frame()`` on purpose. NSScreen
+    measures from the bottom-left of the primary display with y running upward, so a
+    taller secondary monitor reports a *negative* origin; clicks, the accessibility
+    tree, and ``CGEventPost`` all use top-left with y running down. Reporting the
+    AppKit numbers meant every coordinate on a secondary display was quietly wrong by
+    the difference between the two conventions.
+
+    The ordering is also the one ``screencapture -D`` uses, so an index here selects
+    the same display in :func:`capture`.
+    """
+    bounds = _display_bounds()
+    return [
+        {
+            "index": index,
+            "width": int(width),
+            "height": int(height),
+            "x": int(x),
+            "y": int(y),
+            "primary": (x, y) == (0.0, 0.0),
+        }
+        for index, (x, y, width, height) in enumerate(bounds)
+    ]
+
+
+def _display_bounds() -> list[tuple[float, float, float, float]]:
+    """Return ``(x, y, width, height)`` per display, top-left origin, capture order."""
     try:
-        import AppKit
+        import Quartz
     except ImportError:  # pragma: no cover - non-macOS
         return []
 
-    found = []
-    for index, screen in enumerate(AppKit.NSScreen.screens()):
-        frame = screen.frame()
-        found.append(
-            {
-                "index": index,
-                "width": int(frame.size.width),
-                "height": int(frame.size.height),
-                "x": int(frame.origin.x),
-                "y": int(frame.origin.y),
-                "primary": index == 0,
-            }
-        )
-    return found
+    try:
+        error, display_ids, _count = Quartz.CGGetActiveDisplayList(MAX_DISPLAYS, None, None)
+        if error != 0 or not display_ids:
+            return []
+        found = []
+        for display_id in display_ids:
+            rect = Quartz.CGDisplayBounds(display_id)
+            found.append(
+                (
+                    float(rect.origin.x),
+                    float(rect.origin.y),
+                    float(rect.size.width),
+                    float(rect.size.height),
+                )
+            )
+        return found
+    except Exception:  # pragma: no cover - defensive
+        return []

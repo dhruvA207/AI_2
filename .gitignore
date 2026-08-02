@@ -34,6 +34,15 @@ corpora/
 *.arrow
 *.parquet
 
+# Apple voice assets. Siri voice bundles are ~250 MB of Apple's proprietary neural
+# models, extracted from the system MobileAsset store. They are not redistributable —
+# which is the same reason corpora are excluded above — and committing one would push
+# a quarter of a gigabyte of Apple's IP to a public remote, which is hard to undo.
+# They are also unusable: AVSpeechSynthesisVoice only lists voices registered with the
+# system, and there is no public API to load a raw asset directory.
+siri-*-voice*/
+*.caf
+
 # Secrets
 .env
 config/secrets.yaml

@@ -31,6 +31,11 @@ _log = get_logger(__name__)
 MAX_DEPTH = 14
 MAX_ELEMENTS = 400
 
+#: Longest ``value`` that :func:`find` will search inside. Above this a value is a
+#: document rather than a control's contents, and matching it produces a hit whose
+#: coordinates point at a text area rather than at the thing being looked for.
+MAX_VALUE_MATCH = 120
+
 #: Roles worth reporting even without a label: the agent can act on these.
 _INTERACTIVE_ROLES = frozenset(
     {
@@ -273,22 +278,40 @@ def find(tree: Element, text: str, *, actionable_only: bool = True) -> list[Elem
     This is the targeting primitive §4.3 asks for: locate a control by what it *says*
     and click its own frame, rather than guessing pixel coordinates that break the
     moment a window moves.
+
+    Results are ranked, best first: an exact label match, then a label containing the
+    text, then a short value containing it.
+
+    Matching against ``value`` is deliberately restricted to values shorter than
+    :data:`MAX_VALUE_MATCH`. A value is a control's *contents*, and for a checkbox or a
+    text field that is a fine way to find it — but a text area's value is the entire
+    document it displays. Searching a terminal's scrollback for "File" matched the
+    scrollback and returned the centre of the text area, which is a confident, useless
+    click target. Long values are documents, not labels, so they do not identify a
+    control worth clicking.
     """
     needle = text.lower().strip()
     if not needle:
         return []
 
     candidates = actionable_elements(tree) if actionable_only else tree.flatten()
-    exact = []
-    partial = []
+    exact: list[Element] = []
+    by_label: list[Element] = []
+    by_value: list[Element] = []
+
     for element in candidates:
-        haystack = f"{element.label} {element.value}".lower()
-        if needle == element.label.lower().strip():
+        label = element.label.lower().strip()
+        if needle == label:
             exact.append(element)
-        elif needle in haystack:
-            partial.append(element)
+        elif needle in label:
+            by_label.append(element)
+        else:
+            value = element.value.strip()
+            if len(value) <= MAX_VALUE_MATCH and needle in value.lower():
+                by_value.append(element)
+
     # Exact label matches first: "Save" should not be beaten by "Save As...".
-    return exact + partial
+    return exact + by_label + by_value
 
 
 def summarize(tree: Element, *, limit: int = 60) -> str:

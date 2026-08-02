@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from arc.audit import AuditLogger
+from arc.audit.killswitch import KillSwitch
 from arc.errors import ControlError
 from arc.log import get_logger
 
@@ -40,6 +41,10 @@ POLL_INTERVAL = 0.1
 #: Pointer movement, in points, that counts as the user taking over. Small enough to
 #: catch a deliberate nudge, large enough to ignore sensor jitter on a trackpad.
 TAKEOVER_THRESHOLD = 12.0
+
+#: Name this process registers under while it holds control, so ``arc-kill`` lists it
+#: as something recognisable rather than as a bare "arc".
+KILL_SWITCH_NAME = "control"
 
 
 @dataclass
@@ -82,6 +87,7 @@ class ControlSession:
         self._overlay: subprocess.Popen[bytes] | None = None
         self._watcher: threading.Thread | None = None
         self._stop = threading.Event()
+        self._killswitch = KillSwitch()
         self.state = ControlState()
 
     # ── Lifecycle ───────────────────────────────────────────────────────────────
@@ -104,6 +110,15 @@ class ControlSession:
         self.state.released_by = ""
         self._stop.clear()
 
+        # Register before the first synthetic event, not after. ``arc-kill`` and the
+        # abort phrase both work off these PID files, so a process that holds the mouse
+        # without one is a process you cannot stop by the documented means.
+        try:
+            self._killswitch.register(KILL_SWITCH_NAME)
+        except OSError as exc:
+            self.state.active = False
+            raise ControlError(f"could not register with the kill switch: {exc}") from exc
+
         if self._show_overlay:
             self._start_overlay()
         if self._watch:
@@ -124,6 +139,7 @@ class ControlSession:
         self._stop.set()
 
         self._stop_overlay()
+        self._killswitch.unregister(KILL_SWITCH_NAME)
 
         if self._watcher is not None and self._watcher is not threading.current_thread():
             self._watcher.join(timeout=1.0)

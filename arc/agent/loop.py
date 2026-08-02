@@ -116,6 +116,7 @@ class Agent:
         max_steps: int = DEFAULT_MAX_STEPS,
         dry_run: bool = False,
         on_step: Callable[[Step], None] | None = None,
+        on_tool_start: Callable[[Step], None] | None = None,
         journal: Any = None,
         resume_from: Any = None,
     ) -> None:
@@ -128,6 +129,10 @@ class Agent:
         #: Called after each step, so a CLI can show progress rather than appearing
         #: to hang for thirty seconds.
         self._on_step = on_step
+        #: Called just before a tool runs. Separate from ``on_step`` because a UI that
+        #: shows work in progress needs to know a tool has *started*, not that it has
+        #: already finished.
+        self._on_tool_start = on_tool_start
         #: Records progress to disk so a crash mid-task is recoverable (§7).
         self._journal = journal
         #: A prior interrupted run whose steps are replayed into the prompt.
@@ -203,6 +208,13 @@ class Agent:
                 arguments=call.arguments,
                 repairs=repairs,
             )
+
+            # Announced *before* execution, not after. ``on_step`` fires once the tool
+            # has returned, which is too late for anything that wants to show work in
+            # progress — a screen capture or a web fetch is seconds of apparent nothing
+            # otherwise.
+            if self._on_tool_start is not None:
+                self._on_tool_start(step)
 
             step.observation = self._executor.execute(call.name, call.arguments)
             steps.append(step)

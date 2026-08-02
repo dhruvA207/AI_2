@@ -20,7 +20,14 @@ export class InputManager {
   }
 
   _down(e) {
-    if (e.key === 'Escape') { this.state.select(null); return; }
+    // Escape is barge-in. It has to be a key rather than simply talking over ARC:
+    // with no echo cancellation the microphone is deafened while the speakers play,
+    // so speech cannot signal an interruption. Also closes the tool inspector.
+    if (e.key === 'Escape') {
+      fetch('/voice/interrupt', { method: 'POST' }).catch(() => {});
+      this.state.select(null);
+      return;
+    }
     if (e.code !== 'KeyS') return;
 
     if (e.metaKey || e.ctrlKey) {
