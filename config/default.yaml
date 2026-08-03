@@ -47,6 +47,19 @@ voice:
   # the loop, at the cost of speed.
   mode: live
 
+  # Tools the `live` backend may call. An ALLOWLIST, not the whole registry, and empty
+  # would mean live mode can only talk.
+  #
+  # In live mode Gemini is the one deciding to call these, so every name here is a
+  # capability handed to a model running on someone else's machine. Switching a camera
+  # on is a fine thing to grant that way; `shell` and `filesystem` are emphatically not,
+  # which is why this is a list to add to deliberately rather than `all`. The local
+  # backend is unaffected — it reaches every tool through ARC's own model, as always.
+  live_tools:
+    - enable_camera_gestures
+    - disable_camera_gestures
+    - camera_gestures_status
+
   # Rests muted. The microphone is never opened at startup; ⌘S in the web UI (or
   # `arc voice listen`) is what opens it, and every session is written to the audit log.
   enabled: true
@@ -237,3 +250,66 @@ hardware:
 
   # Warn when weights leave less than this much room for KV cache growth.
   min_headroom_gb: 2.0
+
+camera:
+  # Hand-gesture control of windows and the cursor (arc/vision/hands).
+  #
+  #   fist (one hand)             -> move the frontmost window
+  #   pinch with BOTH hands       -> resize it
+  #   two fingers together        -> move the cursor
+  #   two fingers spread (peace)  -> left click
+  #
+  # Off until asked for: it holds the cameras open and takes input control, neither
+  # of which should happen because ARC started.
+
+  # Mirror the frame so moving your hand right moves things right.
+  mirror: true
+  max_hands: 2
+  # Track on a downscaled copy. MediaPipe is no less accurate well below 1280px and
+  # markedly cheaper, which matters with two cameras on a fanless machine.
+  track_width: 960
+
+  # Cameras are matched by NAME, never by index: indices shift whenever anything is
+  # plugged in or macOS decides a nearby iPhone is a webcam. A camera that is not
+  # connected is skipped, and one camera is a supported setup — the second only adds
+  # confirmation speed and depth.
+  #
+  # These two and only these two. Continuity Camera (iPhone/iPad) is refused outright
+  # by the resolver, so a phone drifting into range can never take a slot here even if
+  # it is named — it usually sits at index 0 and would otherwise displace the webcam.
+  cameras:
+    - role: front           # the one your hands point at; the authority on gesture
+      match: C920
+      label: webcam on the monitor (head-on view)
+      width: 1280
+      height: 720
+    - role: side            # sees the same hands edge-on; adds depth
+      match: FaceTime
+      label: built-in camera (side view)
+      width: 1280
+      height: 720
+
+  fusion:
+    # Frames a gesture must hold before it counts. Agreement between the two cameras
+    # is what earns the short wait.
+    confirm_agree: 2
+    confirm_solo: 5
+    # Confidence needed to act. The front camera scores 0.8, so its reading survives
+    # the side camera disagreeing; a hand only the side camera can see scores 0.5 and
+    # is ignored. Raising this above 0.8 disables fist and pinch entirely — that was
+    # the original bug, where an edge-on view vetoed every clench.
+    min_conf: 0.7
+    depth_ema: 0.15
+    depth_dead: 0.01
+
+  mouse:
+    # Fingertip gap that separates "together" (move) from "spread" (click). The gap
+    # between the two is a hysteresis band, so the pose does not flicker at the edge.
+    spread_mouse: 0.36
+    spread_click: 0.46
+    ema: 0.22
+    confirm: 2
+    click_cooldown: 0.35
+    # Fraction of the frame trimmed from each edge before mapping to the desktop.
+    # Hands rarely reach the corners of the view, so the middle is stretched to fill.
+    active: 0.12

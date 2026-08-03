@@ -1,0 +1,46 @@
+#!/bin/bash
+# ARC launcher — type `ARC` in any terminal to start it.
+#
+#   ARC                 # open ARC in its own window (starts the local server too)
+#   ARC doctor          # any CLI subcommand works: doctor, serve, memory, model, ...
+#   ARC --help          # the full list
+#
+# With no arguments this runs `arc ui`, which is the app window plus the loopback
+# server in one process. With arguments it passes them straight through, so this is a
+# complete replacement for the `arc` command rather than a separate way in.
+#
+# macOS filesystems are case-insensitive by default, so `arc` reaches this script too.
+# That is deliberate — either spelling should work.
+#
+# It runs in the FOREGROUND on purpose. macOS grants Accessibility and Screen Recording
+# to the *launching* application, so staying a direct child of your terminal is what
+# keeps window control, screen capture, and input control working.
+#
+# Self-locating: resolves the repo from this script's real path, so it keeps working
+# when called through a symlink in ~/.local/bin.
+
+set -euo pipefail
+
+SRC="${BASH_SOURCE[0]}"
+while [ -h "$SRC" ]; do
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ $SRC != /* ]] && SRC="$DIR/$SRC"
+done
+ROOT="$(cd -P "$(dirname "$SRC")/.." && pwd)"
+
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+  echo "ARC: no virtualenv at $ROOT/.venv" >&2
+  echo "  create it:  cd '$ROOT' && python3.12 -m venv .venv \\" >&2
+  echo "              && .venv/bin/pip install -e '.[mlx,voice,app,camera,dev]'" >&2
+  exit 1
+fi
+
+# `python -m arc` rather than the console script: it works from a plain checkout
+# whether or not `pip install -e .` has been run.
+if [ $# -eq 0 ]; then
+  exec "$PY" -m arc ui
+fi
+
+exec "$PY" -m arc "$@"

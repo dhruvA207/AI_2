@@ -432,3 +432,144 @@ def test_endpoint_wait_is_not_the_old_slow_default() -> None:
     """900 ms was a fifth of the entire response time spent confirming you had
     stopped talking."""
     assert int(Config.load(use_env=False).section("voice")["silence_ms"]) <= 500
+
+
+# ── Tools in live mode ──────────────────────────────────────────────────────────
+#
+# Live mode is Gemini answering, not ARC, so without an explicit bridge it has no way
+# to act. "Turn on the camera feature" reached a model with no such capability and
+# nothing happened — no error, no refusal, the request simply evaporated.
+
+
+def a_live_session(tools=()):
+    from arc.voice.live import LiveSession
+
+    return LiveSession("fake-key-for-construction", tools=tools)
+
+
+def test_allowlisted_tools_are_declared_to_gemini() -> None:
+    from google.genai import types
+
+    session = a_live_session(("enable_camera_gestures", "disable_camera_gestures"))
+    names = [d.name for d in session._declarations(types)]
+    assert names == ["enable_camera_gestures", "disable_camera_gestures"]
+
+
+def test_no_allowlist_means_live_mode_can_only_talk() -> None:
+    """The default has to be "no capabilities", not "every tool ARC has"."""
+    from google.genai import types
+
+    assert a_live_session(())._declarations(types) == []
+
+
+def test_an_unknown_tool_name_is_skipped_not_fatal() -> None:
+    """A renamed tool should not stop the microphone from working."""
+    from google.genai import types
+
+    session = a_live_session(("camera_gestures_status", "tool_that_was_renamed"))
+    assert [d.name for d in session._declarations(types)] == ["camera_gestures_status"]
+
+
+def test_defaults_are_stripped_from_declared_parameters() -> None:
+    """The Live API rejects `default` outright — the session fails to open.
+
+    ARC's registry emits one for every optional argument, so this is not hypothetical.
+    """
+    from arc.voice.live import LiveSession
+
+    trimmed = LiveSession._gemini_schema(
+        {
+            "type": "object",
+            "properties": {"mouse": {"type": "boolean", "default": True}},
+            "required": [],
+        }
+    )
+    assert "default" not in trimmed["properties"]["mouse"]
+    assert trimmed["properties"]["mouse"]["type"] == "boolean"
+
+
+def test_a_tool_outside_the_allowlist_is_refused() -> None:
+    """Defence in depth: Gemini can only call what was declared, but if the allowlist
+    changes under a running session the answer is still no."""
+    session = a_live_session(("camera_gestures_status",))
+    assert "not available" in session._run_tool("run_command", {"command": "echo hello"})
+
+
+def test_an_allowlisted_tool_actually_runs() -> None:
+    session = a_live_session(("camera_gestures_status",))
+    assert "camera gestures are" in session._run_tool("camera_gestures_status", {})
+
+
+def test_a_failing_tool_is_reported_not_raised() -> None:
+    """A broken tool should make ARC say what went wrong, not drop the conversation."""
+    from arc.tools import registry
+
+    session = a_live_session(("camera_gestures_status",))
+    tool = registry.get("camera_gestures_status")
+
+    def boom() -> str:
+        raise RuntimeError("camera exploded")
+
+    object.__setattr__(tool, "function", boom)
+    try:
+        assert "camera exploded" in session._run_tool("camera_gestures_status", {})
+    finally:
+        object.__setattr__(tool, "function", tool.function)
+
+
+def test_the_camera_tools_are_reachable_by_voice() -> None:
+    """The regression: turning the camera on by voice needs these three declared."""
+    from arc.config import Config
+
+    allowed = set(Config.load().section("voice").get("live_tools") or [])
+    assert {"enable_camera_gestures", "disable_camera_gestures"} <= allowed
+
+
+def test_shell_and_filesystem_are_not_handed_to_a_remote_model() -> None:
+    """Live mode's allowlist grants capabilities to a model running on someone else's
+    machine. A camera switch is a reasonable thing to grant that way; these are not."""
+    from arc.config import Config
+
+    allowed = set(Config.load().section("voice").get("live_tools") or [])
+    from arc.tools import registry
+
+    for name in allowed:
+        assert registry.category_of(name) not in {"shell", "filesystem"}
+
+
+def test_a_tool_call_does_not_block_the_receive_loop() -> None:
+    """Awaiting tool work inside `async for response in session.receive()` suspends the
+    only thing draining the socket, so audio already in flight stops arriving and ARC
+    cuts out mid-word. Turning the cameras on takes seconds, which made that a hole in
+    the middle of a sentence rather than a hiccup.
+    """
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("arc/voice/live.py").read_text(encoding="utf-8"))
+    receive = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_receive"
+    )
+    awaited = [
+        node.value.func
+        for node in ast.walk(receive)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Await)
+    ]
+    names = {getattr(f, "attr", None) for f in awaited}
+    assert "_handle_tool_call" not in names, "_receive must dispatch, not await, tool calls"
+
+
+def test_in_flight_tool_calls_are_held_onto() -> None:
+    """asyncio keeps only a weak reference to a running task. Dropping the handle lets
+    it be collected mid-flight, and the Live API then waits forever for a response."""
+    session = a_live_session(("camera_gestures_status",))
+    assert isinstance(session._tool_tasks, set)
+
+
+def test_the_startup_wait_is_short_enough_for_a_conversation() -> None:
+    """A voice turn blocks on this, so it is dead air before ARC confirms."""
+    from arc.tools.camera import _STARTUP_GRACE
+
+    assert _STARTUP_GRACE <= 2.0

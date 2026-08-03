@@ -527,3 +527,50 @@ That trail is worth more than a tidy tree if the question is ever reopened.
 Track B would have plugged into — is not built, but the `LanguageModel` interface it
 would satisfy remains deliberately narrow (ADR-011), so reviving it later costs nothing
 extra.
+
+---
+
+## ADR-024 — Cross-camera agreement accelerates a gesture, it does not gate one
+
+**Decision.** In `arc/vision/hands/fusion.py`, a gesture the front camera reports scores
+above the action threshold even when the side camera disagrees. Agreement between the
+two cameras buys *speed* — an agreed gesture commits in 2 frames instead of 5 — rather
+than deciding whether the gesture counts at all. Only a hand that just the side camera
+can see is discarded.
+
+**Why.** The version this was ported from (JARVIS `Hand-Branch`) scored a contested hand
+at 0.55 and then dropped anything below 0.70. That silently deleted the two gestures the
+side camera is worst at judging: a fist and a pinch seen edge-on are heavily
+foreshortened, so the side view dissented on almost every frame and neither gesture ever
+committed. The symptom was precise and misleading — cursor control worked perfectly,
+because it reads one camera's raw hands and never passes through fusion at all, so the
+feature looked half-implemented rather than misconfigured.
+
+The original code already called the front camera "the authority on WHAT the hand is
+doing" and then let the side camera veto it. This resolves that contradiction in favour
+of the stated intent.
+
+**Consequence.** `camera.fusion.min_conf` must stay at or below 0.8, the front camera's
+score. Raising it above that disables fist and pinch again, which is why the config says
+so at the value. A single-camera setup is unaffected and fully supported; the second
+camera now only adds confirmation speed and the depth estimate.
+
+**Not a control session.** Camera gestures deliberately do *not* run inside an ARC
+control session, and `arc/vision/hands/cursor.py` exists rather than reusing
+`arc/control/input.py` so they cannot drift into one. Turning the feature on is a switch
+— the equivalent of starting gesture control from a terminal — and your own hand is what
+moves the pointer, so there is no takeover to announce. Borrowing the control path would
+raise the indicator, register a kill-switch entry, and end the session the instant you
+touched the physical mouse, which is wrong for a mode you asked to be in. It is stopped
+by asking, or with ESC in the preview.
+
+**Cameras.** The C920 (front) and the built-in FaceTime camera (side), and nothing else.
+Continuity Camera devices are refused by name *and* by index in `cameras.py`: a phone
+drifting into range usually lands at index 0 and renumbers everything after it, so there
+is no configuration that can select one.
+
+**Also.** MediaPipe's own `Closed_Fist` classification — computed by the bundled model
+and discarded by the original — now corroborates the landmark geometry, so a clench that
+is off-angle for one test can still be caught by the other. And pinch is tested *before*
+the two-finger cursor pose: pinching rarely curls the middle finger, so the cursor test
+was claiming pinches and routing a two-handed resize to the mouse.

@@ -92,6 +92,8 @@ kill switch     arc-kill works standalone, no config needed
 ## Commands
 
 ```bash
+ARC                         # launch: the app window plus the loopback server
+ARC <anything>              # same as `arc <anything>`; ~/.local/bin/ARC -> bin/ARC
 arc doctor                  # environment + macOS permission grants
 arc chat                    # REPL; /memory /recall /why /model /tokens
 arc do "<task>"             # multi-step work; --dry-run, --no-server
@@ -104,6 +106,11 @@ arc tools
 arc serve                   # keeps the model warm; 11.5s → 8.7s per task
 arc-kill                    # standalone; works when arc itself does not
 ```
+
+`ARC` is a self-locating wrapper in `bin/`, symlinked onto PATH, so it works from any
+directory and through the symlink. Bare `ARC` runs `arc ui`; anything else passes
+straight through. macOS filesystems are case-insensitive, so `arc` reaches the same
+script — either spelling works, and neither needs the venv activated.
 
 ---
 

@@ -26,10 +26,10 @@ import asyncio
 import contextlib
 import queue
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
-from arc.errors import ArcError
+from arc.errors import ArcError, ToolError
 from arc.log import get_logger
 
 _log = get_logger(__name__)
@@ -68,6 +68,7 @@ class LiveSession:
         on_level: Callable[[float], None] | None = None,
         on_state: Callable[[str], None] | None = None,
         audit: Any = None,
+        tools: Sequence[str] = (),
     ) -> None:
         if not api_key:
             raise ArcError("no Gemini API key; see config/secrets.yaml")
@@ -76,6 +77,11 @@ class LiveSession:
         self._voice = voice
         self._model = model
         self._system = system_prompt
+        #: Names of the tools Gemini may call. See ``voice.live_tools`` in the config
+        #: for why this is an allowlist rather than the registry.
+        self._tool_names = tuple(tools)
+        #: Strong references to in-flight tool calls; see :meth:`_dispatch_tool_call`.
+        self._tool_tasks: set[asyncio.Task[None]] = set()
         self._silence_ms = silence_ms
         self._on_transcript = on_transcript
         self._on_level = on_level
@@ -220,6 +226,11 @@ class LiveSession:
         if self._system:
             config.system_instruction = self._system
 
+        declarations = self._declarations(types)
+        if declarations:
+            config.tools = [types.Tool(function_declarations=declarations)]
+            _log.info("live tools declared", extra={"tools": [d.name for d in declarations]})
+
         async with client.aio.live.connect(model=self._model, config=config) as session:
             self._session = session
             self._out_queue = asyncio.Queue(maxsize=64)
@@ -302,9 +313,148 @@ class LiveSession:
                 audio={"data": chunk["data"], "mime_type": "audio/pcm;rate=16000"}
             )
 
+    @staticmethod
+    def _gemini_schema(schema: dict[str, Any]) -> dict[str, Any]:
+        """Trim a JSON Schema to the subset Gemini's declaration format accepts.
+
+        ARC's registry emits ``default`` for every optional argument, which the Live
+        API rejects outright — the whole session fails to open rather than the key
+        being ignored. Dropping it costs nothing: the tool's own signature supplies the
+        default when the key is simply absent.
+        """
+        allowed = {"type", "description", "enum", "items", "properties", "required"}
+        trimmed = {k: v for k, v in schema.items() if k in allowed}
+        if "properties" in trimmed:
+            trimmed["properties"] = {
+                name: LiveSession._gemini_schema(spec)
+                for name, spec in trimmed["properties"].items()
+            }
+        if "items" in trimmed and isinstance(trimmed["items"], dict):
+            trimmed["items"] = LiveSession._gemini_schema(trimmed["items"])
+        return trimmed
+
+    def _declarations(self, types: Any) -> list[Any]:
+        """Turn the allowlisted tools into Gemini function declarations.
+
+        Built from ARC's own registry rather than written out again here, so a tool's
+        description — the thing that decides whether "turn on the camera feature"
+        actually reaches it — cannot drift between the two backends.
+        """
+        if not self._tool_names:
+            return []
+
+        from arc.tools import registry
+
+        declarations = []
+        for name in self._tool_names:
+            try:
+                schema = registry.get(name).schema()
+            except ToolError:
+                # Skipped rather than fatal: a tool renamed out from under the config
+                # should cost that one capability, not the whole microphone.
+                _log.warning("voice.live_tools names an unknown tool: %s", name)
+                continue
+            declarations.append(
+                types.FunctionDeclaration(
+                    name=schema.name,
+                    description=schema.description,
+                    parameters=self._gemini_schema(schema.parameters),
+                )
+            )
+        return declarations
+
+    def _dispatch_tool_call(self, call: Any) -> None:
+        """Start handling a tool call without holding up the receive loop.
+
+        Awaiting the work here would suspend ``async for response in session.receive()``
+        for its whole duration, and nothing else drains that socket — so audio already
+        on its way stops arriving and ARC cuts out mid-word. Turning on the cameras
+        takes seconds, which made that a several-second hole in the middle of a
+        sentence rather than a hiccup.
+
+        The task is kept in a set because asyncio only holds a weak reference to a
+        running task: dropping the handle lets it be collected mid-flight, and the
+        Live API then waits forever for a response that will never come.
+        """
+        task = asyncio.create_task(self._handle_tool_call(call))
+        self._tool_tasks.add(task)
+        task.add_done_callback(self._tool_tasks.discard)
+
+    async def _handle_tool_call(self, call: Any) -> None:
+        """Run the tools Gemini asked for and hand back the results.
+
+        Executed here rather than passed up to the interface layer: the Live API keeps
+        the turn open until it gets a response for every call, so anything that returns
+        late or not at all leaves the conversation hanging mid-sentence.
+        """
+        from google.genai import types
+
+        responses = []
+        for function_call in getattr(call, "function_calls", None) or []:
+            name = getattr(function_call, "name", "")
+            args = dict(getattr(function_call, "args", None) or {})
+            result = await asyncio.to_thread(self._run_tool, name, args)
+            responses.append(
+                types.FunctionResponse(
+                    id=getattr(function_call, "id", None),
+                    name=name,
+                    response={"result": result},
+                )
+            )
+
+        if responses:
+            await self._session.send_tool_response(function_responses=responses)
+
+    def _run_tool(self, name: str, args: dict[str, Any]) -> str:
+        """Execute one tool call and return what to tell Gemini.
+
+        Called through ``to_thread`` by :meth:`_handle_tool_call`, because these are
+        ordinary blocking functions — starting camera gestures waits seconds for the
+        cameras — and running one on the event loop would freeze audio playback along
+        with everything else.
+
+        Reuses the agent executor's validation and coercion so both backends treat
+        arguments identically. Gemini sends JSON, so ``"true"`` and ``true`` both
+        arrive for a boolean and the tool should not have to care.
+        """
+        from arc.agent.executor import _coerce_arguments, _validate
+        from arc.tools import registry
+
+        if name not in self._tool_names:
+            # Gemini can only call what was declared, so reaching here means the
+            # allowlist changed under a running session. Refuse rather than honour it.
+            _log.warning("live session called an undeclared tool: %s", name)
+            return f"{name} is not available to the voice session"
+
+        try:
+            tool = registry.get(name)
+        except ToolError as exc:
+            return str(exc)
+
+        problem = _validate(tool, args)
+        if problem:
+            return problem
+
+        coerced = _coerce_arguments(tool, args)
+        self._record("voice.live.tool", {"tool": name, "args": coerced})
+
+        try:
+            return str(tool.function(**coerced))
+        except ToolError as exc:
+            return str(exc)  # the tool's own, deliberate refusal
+        except Exception as exc:
+            # Returned as text, not raised: a broken tool should make ARC say what went
+            # wrong, not tear down the conversation.
+            _log.exception("live tool %s raised", name)
+            return f"{type(exc).__name__}: {exc}"
+
     async def _receive(self) -> None:
         while self._running.is_set():
             async for response in self._session.receive():
+                tool_call = getattr(response, "tool_call", None)
+                if tool_call is not None:
+                    self._dispatch_tool_call(tool_call)
+
                 if response.data:
                     if not self._speaking:
                         self._speaking = True

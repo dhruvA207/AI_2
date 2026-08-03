@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "arc"
 version = "0.1.0"
-description = "ARC — a local-first, fully-owned AI assistant."
+description = "ARC — a cool AI assistant."
 requires-python = ">=3.12"
 license = "Apache-2.0"
 authors = [{ name = "Dhruv Agrawal" }]
@@ -38,6 +38,15 @@ voice = [
 # a browser-embedding library that would bring its own dependency tree (§7).
 app = [
     "pyobjc-framework-WebKit>=10",  # MIT — WKWebView in an NSWindow
+]
+# Hand-gesture control of windows and the cursor. Heavy (~500 MB with its transitive
+# numpy/opencv), which is exactly why it is opt-in rather than a core dependency —
+# nothing else in ARC needs a camera pipeline.
+camera = [
+    "mediapipe>=0.10",                     # Apache-2.0 — hand landmarks + gesture model
+    "opencv-python>=4.10",                 # Apache-2.0 — capture and the preview window
+    "pyobjc-framework-AVFoundation>=10",   # MIT — identify cameras by name, not index
+    "pyobjc-framework-ApplicationServices>=10",  # MIT — move/resize windows via AX
 ]
 dev = [
     "pytest>=8.0",   # MIT

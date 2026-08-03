@@ -147,9 +147,13 @@ class Runtime:
         """Build the Gemini Live session. Caller holds the lock.
 
         Not a drop-in for the local path: Live *answers as well as speaks*, so ARC's
-        own model, memory and tools take no part in the turn. That is why it is behind
+        own model and memory take no part in the turn. That is why it is behind
         ``voice.mode`` rather than being the default — it is much faster and it is a
         different assistant.
+
+        Tools are the exception, and only the ones named in ``voice.live_tools``.
+        Without them "turn on the camera feature" reached Gemini, which had no way to
+        do it and no way to say so, and the request simply evaporated.
         """
         from arc.audit import AuditLogger
         from arc.voice.gemini import load_api_key
@@ -179,6 +183,9 @@ class Runtime:
                 on_level=self._push_level,
                 on_state=self._push_state,
                 audit=audit,
+                # An allowlist, not the registry: in this mode Gemini decides what to
+                # call, so each name is a capability granted to a remote model.
+                tools=[str(name) for name in (self.config.get("voice.live_tools") or [])],
             )
         )
         return self._voice
